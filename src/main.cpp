@@ -31,6 +31,7 @@ unsigned long lastTimeBtn2 = micros();
 unsigned long now;
 
 int8_t  cnt;
+int8_t mouseStep = MOUSE_STEP;
 
 void paddleIr() {
   sts = digitalRead(PIN_S1) << 1 | digitalRead(PIN_S2);
@@ -48,20 +49,20 @@ void paddleIr() {
       dir = DIR_N;
     }
     if (dir == DIR_RIGHT) {
-      cnt += MOUSE_STEP;
+      cnt += mouseStep;
       inertial = true;
     } else if (dir == DIR_LEFT) {
-      cnt -= MOUSE_STEP;
+      cnt -= mouseStep;
       inertial = true;
     }
   } else if (xorSts == 1) {
     dir = DIR_RIGHT;
     inertial = false;
-    cnt += MOUSE_STEP;
+    cnt += mouseStep;
   } else {
     dir = DIR_LEFT;
     inertial = false;
-    cnt -= MOUSE_STEP;
+    cnt -= mouseStep;
   }
 
   lastLastSts = lastSts;
@@ -76,6 +77,11 @@ void setup() {
   pinMode(PIN_S2, INPUT_PULLUP);
   pinMode(PIN_BTN1, INPUT_PULLUP);
   pinMode(PIN_BTN2, INPUT_PULLUP);
+
+  // 起動時にボタンが同時に押されている場合は、マウスの移動量を遅くする
+  if (!digitalRead(PIN_BTN1) && !digitalRead(PIN_BTN2)) {
+    mouseStep = MOUSE_STEP_SLOW;
+  }
 
   TinyUSB_Device_Init(0);
   usb_hid.begin();

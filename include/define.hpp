@@ -12,7 +12,8 @@
 #define DIR_RIGHT   (1u)
 #define DIR_LEFT    (2u)
 
-#define MOUSE_STEP  (6u)
+#define MOUSE_STEP      (6u)
+#define MOUSE_STEP_SLOW (1u)
 
 #define INTERVAL      (200000u)
 #define INTERVAL_BTN  (10000u)

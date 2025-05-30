@@ -21,6 +21,11 @@ picoのBOOTSELを押しながらUSBケーブルを接続するとエクスプロ
 そこにfirmwareフォルダのfirmware.uf2をコピーしてください<br>
 ファームウェアの更新が完了するとpicoが再起動します
 
+### 低速モード
+X68000Z用ソフト「メタルオレンジEX」をプレイしたところ、感度が良すぎて扱いきれなかったので、低速モードを追加しました<br>
+両方のボタンを同時押ししながらUSBパドルコントローラを起動すると、感度が1/6の低速モードになります<br>
+本来なら切り替えスイッチを付けるべきなんでしょうけど…<br>
+
 ### 参考サイト
 - ういよめん氏　Arkanoid Paddle (spinner) controller Rotary encoder<br>
 https://www.thingiverse.com/thing:5404242
