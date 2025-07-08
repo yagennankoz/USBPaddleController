@@ -19,19 +19,26 @@ uint8_t sts;
 uint8_t xorSts;
 uint8_t dir;
 bool inertial = false;
+bool axisAlt = false;
 
 uint8_t lastBtn1Sts;
 uint8_t btn1Sts;
 uint8_t lastBtn2Sts;
 uint8_t btn2Sts;
+uint8_t lastBtnAxisSts;
+uint8_t btnAxisSts;
+uint8_t lastBtnSpdSts;
+uint8_t btnSpdSts;
 
 unsigned long lastTime = micros();
 unsigned long lastTimeBtn1 = micros();
 unsigned long lastTimeBtn2 = micros();
+unsigned long lastTimeBtnAxis = micros();
+unsigned long lastTimeBtnSpd = micros();
 unsigned long now;
 
 int8_t  cnt;
-int8_t mouseStep = MOUSE_STEP;
+int8_t mouseStep = MOUSE_STEP_NORMAL;
 
 void paddleIr() {
   sts = digitalRead(PIN_S1) << 1 | digitalRead(PIN_S2);
@@ -77,8 +84,10 @@ void setup() {
   pinMode(PIN_S2, INPUT_PULLUP);
   pinMode(PIN_BTN1, INPUT_PULLUP);
   pinMode(PIN_BTN2, INPUT_PULLUP);
+  pinMode(PIN_BTNSPD, INPUT_PULLUP);
+  pinMode(PIN_BTNAXIS, INPUT_PULLUP);
 
-  // ‹N“®Žž‚Éƒ{ƒ^ƒ“‚ª“¯Žž‚É‰Ÿ‚³‚ê‚Ä‚¢‚éê‡‚ÍAƒ}ƒEƒX‚ÌˆÚ“®—Ê‚ð’x‚­‚·‚é
+  // èµ·å‹•æ™‚ã«ãƒœã‚¿ãƒ³ãŒåŒæ™‚ã«æŠ¼ã•ã‚Œã¦ã„ã‚‹å ´åˆã¯ã€ãƒžã‚¦ã‚¹ã®ç§»å‹•é‡ã‚’é…ãã™ã‚‹
   if (!digitalRead(PIN_BTN1) && !digitalRead(PIN_BTN2)) {
     mouseStep = MOUSE_STEP_SLOW;
   }
@@ -91,9 +100,6 @@ void setup() {
 }
 
 void loop() {
-  mouse_report.y = 0;
-  mouse_report.x = cnt;
-  btn1Sts = !digitalRead(PIN_BTN1);
   now = micros();
   if (lastTime > now) {
     lastTime = 0;
@@ -104,6 +110,14 @@ void loop() {
   if (lastTimeBtn2 > now) {
     lastTimeBtn2 = 0;
   }
+  if (lastTimeBtnSpd > now) {
+    lastTimeBtnSpd = 0;
+  }
+  if (lastTimeBtnAxis > now) {
+    lastTimeBtnAxis = 0;
+  }
+
+  btn1Sts = !digitalRead(PIN_BTN1);
   if (lastBtn1Sts != btn1Sts) {
     if (lastTimeBtn1 + INTERVAL_BTN > now) {
       btn1Sts = lastBtn1Sts;
@@ -121,6 +135,44 @@ void loop() {
     }
   }
 
+  btnSpdSts = !digitalRead(PIN_BTNSPD);
+  if (lastBtnSpdSts != btnSpdSts) {
+    if (lastTimeBtnSpd + INTERVAL_BTN > now) {
+      btnSpdSts = lastBtnSpdSts;
+    } else {
+      lastTimeBtnSpd = now;
+      if (btnSpdSts) {
+        if (mouseStep == MOUSE_STEP_NORMAL) {
+          mouseStep = MOUSE_STEP_MIDDLE;
+        } else if (mouseStep == MOUSE_STEP_MIDDLE) {
+          mouseStep = MOUSE_STEP_SLOW;
+        } else {
+          mouseStep = MOUSE_STEP_NORMAL;
+        }
+      }
+    }
+  }
+
+  btnAxisSts = !digitalRead(PIN_BTNAXIS);
+  if (lastBtnAxisSts != btnAxisSts) {
+    if (lastTimeBtnAxis + INTERVAL_BTN > now) {
+      btnAxisSts = lastBtnAxisSts;
+    } else {
+      lastTimeBtnAxis = now;
+      if (btnAxisSts) {
+        axisAlt = !axisAlt;
+      }
+    }
+  }
+
+  if (axisAlt) {
+    mouse_report.x = 0;
+    mouse_report.y = cnt;
+  } else {
+    mouse_report.x = cnt;
+    mouse_report.y = 0;
+  }
+
   mouse_report.buttons = btn1Sts | btn2Sts <<1;
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
@@ -130,5 +182,7 @@ void loop() {
 
   lastBtn1Sts = btn1Sts;
   lastBtn2Sts = btn2Sts;
+  lastBtnAxisSts = btnAxisSts;
+  lastBtnSpdSts = btnSpdSts;
 }
 

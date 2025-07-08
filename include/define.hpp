@@ -7,13 +7,16 @@
 
 #define PIN_BTN1    D19
 #define PIN_BTN2    D18
+#define PIN_BTNSPD  D17
+#define PIN_BTNAXIS D16
 
 #define DIR_N       (0u)
 #define DIR_RIGHT   (1u)
 #define DIR_LEFT    (2u)
 
-#define MOUSE_STEP      (6u)
-#define MOUSE_STEP_SLOW (1u)
+#define MOUSE_STEP_NORMAL  (6u)
+#define MOUSE_STEP_MIDDLE  (2u)
+#define MOUSE_STEP_SLOW    (1u)
 
 #define INTERVAL      (200000u)
 #define INTERVAL_BTN  (10000u)
