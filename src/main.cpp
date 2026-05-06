@@ -37,14 +37,47 @@ unsigned long lastTimeBtnAxis = micros();
 unsigned long lastTimeBtnSpd = micros();
 unsigned long now;
 
-int8_t  cnt;
-int8_t mouseStep = MOUSE_STEP_NORMAL;
+float cnt;
+int8_t  mouseStepIdx = 0;
+int8_t mouseStep = mouseStepTable[mouseStepIdx];
+
+// チャタリング対策用
+unsigned long lastPaddleIrTime = 0;
+float smoothedCnt = 0.0f;
+
+int8_t toMouseDelta(float value) {
+  return (int8_t)(value >= 0.0f ? value + 0.5f : value - 0.5f);
+}
+
+float resolvePaddleStep(unsigned long intervalUs) {
+  if (mouseStep <= 1 || intervalUs >= PADDLE_SLOW_INTERVAL_US) {
+    return 1.0f;
+  }
+
+  if (intervalUs <= PADDLE_FAST_INTERVAL_US) {
+    return (float)mouseStep;
+  }
+
+  float intervalRange = (float)(PADDLE_SLOW_INTERVAL_US - PADDLE_FAST_INTERVAL_US);
+  float ratio = (float)(PADDLE_SLOW_INTERVAL_US - intervalUs) / intervalRange;
+  return 1.0f + ratio * (float)(mouseStep - 1);
+}
 
 void paddleIr() {
+  // デバウンス: 前回の割り込みから一定時間経過していない場合はスキップ
+  unsigned long now_ir = micros();
+  if (now_ir - lastPaddleIrTime < DEBOUNCE_TIME_US) {
+    return;
+  }
+  lastPaddleIrTime = now_ir;
+  
   sts = digitalRead(PIN_S1) << 1 | digitalRead(PIN_S2);
 
   now = micros();
   if (now < lastTime) lastTime = 0;
+
+  unsigned long intervalUs = lastTime == 0 ? PADDLE_SLOW_INTERVAL_US : now - lastTime;
+  float paddleStep = resolvePaddleStep(intervalUs);
 
   if (inertial && lastTime + INTERVAL < now) {
     dir = DIR_N;
@@ -56,25 +89,32 @@ void paddleIr() {
       dir = DIR_N;
     }
     if (dir == DIR_RIGHT) {
-      cnt += mouseStep;
+      cnt += paddleStep;
       inertial = true;
     } else if (dir == DIR_LEFT) {
-      cnt -= mouseStep;
+      cnt -= paddleStep;
       inertial = true;
     }
   } else if (xorSts == 1) {
     dir = DIR_RIGHT;
     inertial = false;
-    cnt += mouseStep;
+    cnt += paddleStep;
   } else {
     dir = DIR_LEFT;
     inertial = false;
-    cnt -= mouseStep;
+    cnt -= paddleStep;
   }
 
   lastLastSts = lastSts;
   lastSts = sts;
   lastTime = now;
+
+  // 停止直後の立ち上がりと逆方向への切り返しは減衰させず、連続回転中だけ平滑化する。
+  if (smoothedCnt == 0.0f || (smoothedCnt > 0.0f && cnt < 0) || (smoothedCnt < 0.0f && cnt > 0)) {
+    smoothedCnt = (float)cnt;
+  } else {
+    smoothedCnt = smoothedCnt * (1.0f - EMA_ALPHA) + cnt * EMA_ALPHA;
+  }
 }
 
 void setup() {
@@ -89,7 +129,8 @@ void setup() {
 
   // 起動時にボタンが同時に押されている場合は、マウスの移動量を遅くする
   if (!digitalRead(PIN_BTN1) && !digitalRead(PIN_BTN2)) {
-    mouseStep = MOUSE_STEP_SLOW;
+    mouseStepIdx = 3;
+    mouseStep = mouseStepTable[mouseStepIdx];
   }
 
   TinyUSB_Device_Init(0);
@@ -142,13 +183,8 @@ void loop() {
     } else {
       lastTimeBtnSpd = now;
       if (btnSpdSts) {
-        if (mouseStep == MOUSE_STEP_NORMAL) {
-          mouseStep = MOUSE_STEP_MIDDLE;
-        } else if (mouseStep == MOUSE_STEP_MIDDLE) {
-          mouseStep = MOUSE_STEP_SLOW;
-        } else {
-          mouseStep = MOUSE_STEP_NORMAL;
-        }
+        mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
+        mouseStep = mouseStepTable[mouseStepIdx];
       }
     }
   }
@@ -165,11 +201,14 @@ void loop() {
     }
   }
 
+  // 平滑化された値をマウスレポートに使用
+  int8_t smoothedValue = toMouseDelta(smoothedCnt);
+  
   if (axisAlt) {
     mouse_report.x = 0;
-    mouse_report.y = cnt;
+    mouse_report.y = smoothedValue;
   } else {
-    mouse_report.x = cnt;
+    mouse_report.x = smoothedValue;
     mouse_report.y = 0;
   }
 
@@ -177,7 +216,8 @@ void loop() {
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
     usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
-    cnt = 0;
+    cnt -= (float)smoothedValue;
+    smoothedCnt -= (float)smoothedValue;
   }
 
   lastBtn1Sts = btn1Sts;
