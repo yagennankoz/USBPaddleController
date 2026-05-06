@@ -129,7 +129,7 @@ void setup() {
 
   // 起動時にボタンが同時に押されている場合は、マウスの移動量を遅くする
   if (!digitalRead(PIN_BTN1) && !digitalRead(PIN_BTN2)) {
-    mouseStepIdx = 3;
+    mouseStepIdx = sizeof(mouseStepTable) - 1;
     mouseStep = mouseStepTable[mouseStepIdx];
   }
 
