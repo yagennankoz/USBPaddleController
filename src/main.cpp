@@ -42,8 +42,8 @@ unsigned long lastTimeBtnAxis = micros();
 unsigned long lastTimeBtnSpd = micros();
 unsigned long now;
 
-float cnt;
-int8_t  mouseStepIdx = 0;
+int8_t cnt;
+int8_t mouseStepIdx = 0;
 int8_t mouseStep = mouseStepTable[mouseStepIdx];
 
 // チャタリング対策用
@@ -52,20 +52,6 @@ float smoothedCnt = 0.0f;
 
 int8_t toMouseDelta(float value) {
   return (int8_t)(value >= 0.0f ? value + 0.5f : value - 0.5f);
-}
-
-float resolvePaddleStep(unsigned long intervalUs) {
-  if (mouseStep <= 1 || intervalUs >= PADDLE_SLOW_INTERVAL_US) {
-    return 1.0f;
-  }
-
-  if (intervalUs <= PADDLE_FAST_INTERVAL_US) {
-    return (float)mouseStep;
-  }
-
-  float intervalRange = (float)(PADDLE_SLOW_INTERVAL_US - PADDLE_FAST_INTERVAL_US);
-  float ratio = (float)(PADDLE_SLOW_INTERVAL_US - intervalUs) / intervalRange;
-  return 1.0f + ratio * (float)(mouseStep - 1);
 }
 
 void paddleIr() {
@@ -81,9 +67,6 @@ void paddleIr() {
   now = micros();
   if (now < lastTime) lastTime = 0;
 
-  unsigned long intervalUs = lastTime == 0 ? PADDLE_SLOW_INTERVAL_US : now - lastTime;
-  float paddleStep = resolvePaddleStep(intervalUs);
-
   if (inertial && lastTime + INTERVAL < now) {
     dir = DIR_N;
   }
@@ -94,20 +77,20 @@ void paddleIr() {
       dir = DIR_N;
     }
     if (dir == DIR_RIGHT) {
-      cnt += paddleStep;
+      cnt += mouseStep;
       inertial = true;
     } else if (dir == DIR_LEFT) {
-      cnt -= paddleStep;
+      cnt -= mouseStep;
       inertial = true;
     }
   } else if (xorSts == 1) {
     dir = DIR_RIGHT;
     inertial = false;
-    cnt += paddleStep;
+    cnt += mouseStep;
   } else {
     dir = DIR_LEFT;
     inertial = false;
-    cnt -= paddleStep;
+    cnt -= mouseStep;
   }
 
   lastLastSts = lastSts;

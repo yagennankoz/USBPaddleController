@@ -57,12 +57,8 @@ typedef struct MY_TU_ATTR_PACKED
   int8_t    y;            ///< Delta y  movement of left analog-stick
 }my_hid_mouse_report_t;
 
-const int8_t mouseStepTable[] = {6, 4, 2};
+const int8_t mouseStepTable[] = {8, 5, 2};
 
 // チャタリング対策
-#define DEBOUNCE_TIME_US  (5u)     // 割り込みデバウンス時間 (マイクロ秒)
+#define DEBOUNCE_TIME_US  (3u)     // 割り込みデバウンス時間 (マイクロ秒)
 #define EMA_ALPHA         (0.5f)    // 指数移動平均の平滑化係数 (0.0-1.0, 小さいほど滑らか)
-
-// 回転速度に応じた移動量の可変範囲
-#define PADDLE_FAST_INTERVAL_US (600u)   // これ以下なら mouseStep を使う
-#define PADDLE_SLOW_INTERVAL_US (20000u)  // これ以上なら 1 ステップに落とす
