@@ -1,4 +1,4 @@
-![USBパドルコントローラ外観](https://github.com/yagennankoz/USBPaddleController/blob/main/image/USBPaddleController.jpg "USBパドルコントローラ外観")
+![USBパドルコントローラ外観](https://github.com/yagennankoz/USBPaddleController/blob/main/image/USBPaddleController_large.jpg "USBパドルコントローラ外観")
 <br>
 ![USBパドルコントローラ内部](https://github.com/yagennankoz/USBPaddleController/blob/main/image/USBPaddleController_inside.jpg "USBパドルコントローラ内部")
 <br>
