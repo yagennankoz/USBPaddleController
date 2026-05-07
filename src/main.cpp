@@ -29,6 +29,8 @@ uint8_t lastBtnAxisSts;
 uint8_t btnAxisSts;
 uint8_t lastBtnSpdSts;
 uint8_t btnSpdSts;
+bool axisComboActive = false;
+bool axisComboConsumed = false;
 
 unsigned long lastTime = micros();
 unsigned long lastTimeBtn1 = micros();
@@ -195,8 +197,12 @@ void loop() {
       btnAxisSts = lastBtnAxisSts;
     } else {
       lastTimeBtnAxis = now;
-      if (btnAxisSts) {
-        axisAlt = !axisAlt;
+      if (!btnAxisSts) {
+        if (!axisComboConsumed) {
+          axisAlt = !axisAlt;
+        }
+        axisComboActive = false;
+        axisComboConsumed = false;
       }
     }
   }
@@ -212,7 +218,23 @@ void loop() {
     mouse_report.y = 0;
   }
 
-  mouse_report.buttons = btn1Sts | btn2Sts <<1;
+  if (!axisComboActive && btnAxisSts && (btn1Sts || btn2Sts)) {
+    axisComboActive = true;
+    axisComboConsumed = true;
+  }
+
+  bool centerClick = axisComboActive;
+
+  if (axisComboActive && !btnAxisSts) {
+    axisComboActive = false;
+  }
+
+  if (axisComboActive) {
+    btn1Sts = 0;
+    btn2Sts = 0;
+  }
+
+  mouse_report.buttons = btn1Sts | btn2Sts << 1 | centerClick << 2;
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
     usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
