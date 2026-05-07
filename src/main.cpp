@@ -25,6 +25,8 @@ uint8_t lastBtn1Sts;
 uint8_t btn1Sts;
 uint8_t lastBtn2Sts;
 uint8_t btn2Sts;
+uint8_t lastBtn3Sts;
+uint8_t btn3Sts;
 uint8_t lastBtnAxisSts;
 uint8_t btnAxisSts;
 uint8_t lastBtnSpdSts;
@@ -35,6 +37,7 @@ bool axisComboConsumed = false;
 unsigned long lastTime = micros();
 unsigned long lastTimeBtn1 = micros();
 unsigned long lastTimeBtn2 = micros();
+unsigned long lastTimeBtn3 = micros();
 unsigned long lastTimeBtnAxis = micros();
 unsigned long lastTimeBtnSpd = micros();
 unsigned long now;
@@ -126,6 +129,7 @@ void setup() {
   pinMode(PIN_S2, INPUT_PULLUP);
   pinMode(PIN_BTN1, INPUT_PULLUP);
   pinMode(PIN_BTN2, INPUT_PULLUP);
+  pinMode(PIN_BTN3, INPUT_PULLUP);
   pinMode(PIN_BTNSPD, INPUT_PULLUP);
   pinMode(PIN_BTNAXIS, INPUT_PULLUP);
 
@@ -153,6 +157,9 @@ void loop() {
   if (lastTimeBtn2 > now) {
     lastTimeBtn2 = 0;
   }
+  if (lastTimeBtn3 > now) {
+    lastTimeBtn3 = 0;
+  }
   if (lastTimeBtnSpd > now) {
     lastTimeBtnSpd = 0;
   }
@@ -175,6 +182,15 @@ void loop() {
       btn2Sts = lastBtn2Sts;
     } else {
       lastTimeBtn2 = now;
+    }
+  }
+
+  btn3Sts = !digitalRead(PIN_BTN3);
+  if (lastBtn3Sts != btn3Sts) {
+    if (lastTimeBtn3 + INTERVAL_BTN > now) {
+      btn3Sts = lastBtn3Sts;
+    } else {
+      lastTimeBtn3 = now;
     }
   }
 
@@ -223,7 +239,7 @@ void loop() {
     axisComboConsumed = true;
   }
 
-  bool centerClick = axisComboActive;
+  bool centerClick = axisComboActive || btn3Sts;
 
   if (axisComboActive && !btnAxisSts) {
     axisComboActive = false;
@@ -244,6 +260,7 @@ void loop() {
 
   lastBtn1Sts = btn1Sts;
   lastBtn2Sts = btn2Sts;
+  lastBtn3Sts = btn3Sts;
   lastBtnAxisSts = btnAxisSts;
   lastBtnSpdSts = btnSpdSts;
 }

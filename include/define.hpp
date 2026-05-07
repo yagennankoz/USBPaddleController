@@ -7,6 +7,7 @@
 
 #define PIN_BTN1    D19
 #define PIN_BTN2    D18
+#define PIN_BTN3    D15
 #define PIN_BTNSPD  D17
 #define PIN_BTNAXIS D16
 
