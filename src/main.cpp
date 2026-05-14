@@ -31,8 +31,18 @@ uint8_t lastBtnAxisSts;
 uint8_t btnAxisSts;
 uint8_t lastBtnSpdSts;
 uint8_t btnSpdSts;
-bool axisComboActive = false;
-bool axisComboConsumed = false;
+bool speedComboActive = false;
+bool speedComboConsumed = false;
+
+bool btn1AutoFire = false;
+bool btn2AutoFire = false;
+bool btn3AutoFire = false;
+bool autoFireStateBtn1 = false;
+bool autoFireStateBtn2 = false;
+bool autoFireStateBtn3 = false;
+unsigned long lastAutoFireBtn1 = 0;
+unsigned long lastAutoFireBtn2 = 0;
+unsigned long lastAutoFireBtn3 = 0;
 
 unsigned long lastTime = micros();
 unsigned long lastTimeBtn1 = micros();
@@ -183,9 +193,13 @@ void loop() {
       btnSpdSts = lastBtnSpdSts;
     } else {
       lastTimeBtnSpd = now;
-      if (btnSpdSts) {
-        mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
-        mouseStep = mouseStepTable[mouseStepIdx];
+      if (!btnSpdSts) {
+        if (!speedComboConsumed) {
+          mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
+          mouseStep = mouseStepTable[mouseStepIdx];
+        }
+        speedComboActive = false;
+        speedComboConsumed = false;
       }
     }
   }
@@ -196,12 +210,8 @@ void loop() {
       btnAxisSts = lastBtnAxisSts;
     } else {
       lastTimeBtnAxis = now;
-      if (!btnAxisSts) {
-        if (!axisComboConsumed) {
-          axisAlt = !axisAlt;
-        }
-        axisComboActive = false;
-        axisComboConsumed = false;
+      if (btnAxisSts) {
+        axisAlt = !axisAlt;
       }
     }
   }
@@ -217,23 +227,71 @@ void loop() {
     mouse_report.y = 0;
   }
 
-  if (!axisComboActive && btnAxisSts && (btn1Sts || btn2Sts)) {
-    axisComboActive = true;
-    axisComboConsumed = true;
+  if (!speedComboActive && btnSpdSts && (btn1Sts || btn2Sts || btn3Sts)) {
+    speedComboActive = true;
+    speedComboConsumed = true;
+    if (btn1Sts) {
+      btn1AutoFire = !btn1AutoFire;
+    } else if (btn2Sts) {
+      btn2AutoFire = !btn2AutoFire;
+    } else if (btn3Sts) {
+      btn3AutoFire = !btn3AutoFire;
+    }
   }
 
-  bool centerClick = axisComboActive || btn3Sts;
+  uint8_t outBtn1 = btn1Sts;
+  uint8_t outBtn2 = btn2Sts;
+  uint8_t outBtn3 = btn3Sts;
 
-  if (axisComboActive && !btnAxisSts) {
-    axisComboActive = false;
+  if (speedComboActive) {
+    outBtn1 = 0;
+    outBtn2 = 0;
+    outBtn3 = 0;
   }
 
-  if (axisComboActive) {
-    btn1Sts = 0;
-    btn2Sts = 0;
+  // オートファイア処理
+  uint8_t btn1AutoFireOutput = 0;
+  uint8_t btn2AutoFireOutput = 0;
+  uint8_t btn3AutoFireOutput = 0;
+
+  if (btn1AutoFire && outBtn1) {
+    if (now - lastAutoFireBtn1 >= AUTO_FIRE_INTERVAL) {
+      autoFireStateBtn1 = !autoFireStateBtn1;
+      lastAutoFireBtn1 = now;
+    }
+    btn1AutoFireOutput = autoFireStateBtn1;
+  } else {
+    lastAutoFireBtn1 = now;
+    autoFireStateBtn1 = false;
   }
 
-  mouse_report.buttons = btn1Sts | btn2Sts << 1 | centerClick << 2;
+  if (btn2AutoFire && outBtn2) {
+    if (now - lastAutoFireBtn2 >= AUTO_FIRE_INTERVAL) {
+      autoFireStateBtn2 = !autoFireStateBtn2;
+      lastAutoFireBtn2 = now;
+    }
+    btn2AutoFireOutput = autoFireStateBtn2;
+  } else {
+    lastAutoFireBtn2 = now;
+    autoFireStateBtn2 = false;
+  }
+
+  if (btn3AutoFire && outBtn3) {
+    if (now - lastAutoFireBtn3 >= AUTO_FIRE_INTERVAL) {
+      autoFireStateBtn3 = !autoFireStateBtn3;
+      lastAutoFireBtn3 = now;
+    }
+    btn3AutoFireOutput = autoFireStateBtn3;
+  } else {
+    lastAutoFireBtn3 = now;
+    autoFireStateBtn3 = false;
+  }
+
+  uint8_t finalBtn1 = btn1AutoFire ? btn1AutoFireOutput : outBtn1;
+  uint8_t finalBtn2 = btn2AutoFire ? btn2AutoFireOutput : outBtn2;
+  uint8_t finalBtn3 = btn3AutoFire ? btn3AutoFireOutput : outBtn3;
+
+  mouse_report.buttons = finalBtn1 | finalBtn2 << 1 | finalBtn3 << 2;
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
     usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
