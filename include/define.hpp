@@ -57,7 +57,7 @@ typedef struct MY_TU_ATTR_PACKED
   int8_t    y;            ///< Delta y  movement of left analog-stick
 }my_hid_mouse_report_t;
 
-const int8_t mouseStepTable[] = {8, 5, 2};
+const int8_t mouseStepTable[] = {8, 4, 2};
 
 // チャタリング対策
 #define DEBOUNCE_TIME_US  (3u)     // 割り込みデバウンス時間 (マイクロ秒)
