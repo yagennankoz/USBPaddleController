@@ -15,7 +15,7 @@
 #define DIR_RIGHT   (1u)
 #define DIR_LEFT    (2u)
 
-#define INTERVAL      (200000u)
+#define INTERVAL      (2000u)
 #define INTERVAL_BTN  (10000u)
 
 #define MY_TUD_HID_REPORT_DESC_MOUSE(...) \
@@ -58,9 +58,5 @@ typedef struct MY_TU_ATTR_PACKED
 }my_hid_mouse_report_t;
 
 const int8_t mouseStepTable[] = {8, 6, 4, 2};
-
-// チャタリング対策
-#define DEBOUNCE_TIME_US  (3u)     // 割り込みデバウンス時間 (マイクロ秒)
-#define EMA_ALPHA         (0.5f)    // 指数移動平均の平滑化係数 (0.0-1.0, 小さいほど滑らか)
 
 const unsigned long AUTO_FIRE_INTERVAL = 50000u; // 連射インターバル (マイクロ秒)

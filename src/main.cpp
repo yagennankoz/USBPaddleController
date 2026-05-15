@@ -1,7 +1,7 @@
 #include <Arduino.h>
-#include <stdio.h>
-#include <string.h>
 #include <hardware/gpio.h>
+#include <pico/multicore.h>
+#include <pico/critical_section.h>
 #include <SPI.h>
 #include <Adafruit_TinyUSB.h>
 #include <define.hpp>
@@ -10,10 +10,10 @@ uint8_t const desc_hid_report[] =
 {
     MY_TUD_HID_REPORT_DESC_MOUSE()
 };
-Adafruit_USBD_HID usb_hid(desc_hid_report, sizeof(desc_hid_report), HID_ITF_PROTOCOL_NONE, 2, false);
+Adafruit_USBD_HID usb_hid(desc_hid_report, sizeof(desc_hid_report), HID_ITF_PROTOCOL_NONE, 1, false);
 my_hid_mouse_report_t   mouse_report;
 
-uint8_t lastLastSts;
+// uint8_t lastLastSts;
 uint8_t lastSts;
 uint8_t sts;
 uint8_t xorSts;
@@ -50,31 +50,38 @@ unsigned long lastTimeBtn2 = micros();
 unsigned long lastTimeBtn3 = micros();
 unsigned long lastTimeBtnAxis = micros();
 unsigned long lastTimeBtnSpd = micros();
-unsigned long now;
 
-int8_t cnt;
-int8_t mouseStepIdx = 0;
-int8_t mouseStep = mouseStepTable[mouseStepIdx];
+int16_t cnt;
+int16_t mouseStepIdx = 0;
+int16_t mouseStep = mouseStepTable[mouseStepIdx];
 
-// チャタリング対策用
-unsigned long lastPaddleIrTime = 0;
-float smoothedCnt = 0.0f;
+critical_section_t reportStateCs;
+volatile uint8_t sharedButtons = 0;
+volatile bool sharedAxisAlt = false;
 
-int8_t toMouseDelta(float value) {
-  return (int8_t)(value >= 0.0f ? value + 0.5f : value - 0.5f);
+const unsigned long REPORT_INTERVAL_US = 1000u;
+
+int8_t toMouseDelta(int16_t value) {
+  if (value > 127) {
+    return (int8_t)127;
+  }
+  if (value < -127) {
+    return (int8_t)-127;
+  }
+  return (int8_t)value;
+}
+
+void publishReportState(uint8_t buttons, bool axisIsAlt) {
+  critical_section_enter_blocking(&reportStateCs);
+  sharedButtons = buttons;
+  sharedAxisAlt = axisIsAlt;
+  critical_section_exit(&reportStateCs);
 }
 
 void paddleIr() {
-  // デバウンス: 前回の割り込みから一定時間経過していない場合はスキップ
-  unsigned long now_ir = micros();
-  if (now_ir - lastPaddleIrTime < DEBOUNCE_TIME_US) {
-    return;
-  }
-  lastPaddleIrTime = now_ir;
-  
-  sts = digitalRead(PIN_S1) << 1 | digitalRead(PIN_S2);
+  sts = gpio_get(PIN_S1) << 1 | gpio_get(PIN_S2);
 
-  now = micros();
+  unsigned long now = micros();
   if (now < lastTime) lastTime = 0;
 
   if (inertial && lastTime + INTERVAL < now) {
@@ -83,6 +90,8 @@ void paddleIr() {
 
   xorSts = lastSts xor sts;
   if (xorSts == 3) {
+    // 両方のスイッチが同時に変化した場合は、異常として無視する
+    /*
     if (lastLastSts == lastSts) {
       dir = DIR_N;
     }
@@ -93,25 +102,174 @@ void paddleIr() {
       cnt -= mouseStep;
       inertial = true;
     }
+    */
   } else if (xorSts == 1) {
+    if (dir == DIR_LEFT) {
+      cnt = 0;
+    }
     dir = DIR_RIGHT;
     inertial = false;
     cnt += mouseStep;
   } else {
+    if (dir == DIR_RIGHT) {
+      cnt = 0;
+    }
     dir = DIR_LEFT;
     inertial = false;
     cnt -= mouseStep;
   }
 
-  lastLastSts = lastSts;
+//   lastLastSts = lastSts;
   lastSts = sts;
   lastTime = now;
+}
 
-  // 停止直後の立ち上がりと逆方向への切り返しは減衰させず、連続回転中だけ平滑化する。
-  if (smoothedCnt == 0.0f || (smoothedCnt > 0.0f && cnt < 0) || (smoothedCnt < 0.0f && cnt > 0)) {
-    smoothedCnt = (float)cnt;
-  } else {
-    smoothedCnt = smoothedCnt * (1.0f - EMA_ALPHA) + cnt * EMA_ALPHA;
+void core1Task() {
+  while (true) {
+    unsigned long now = micros();
+    if (lastTimeBtn1 > now) {
+      lastTimeBtn1 = 0;
+    }
+    if (lastTimeBtn2 > now) {
+      lastTimeBtn2 = 0;
+    }
+    if (lastTimeBtn3 > now) {
+      lastTimeBtn3 = 0;
+    }
+    if (lastTimeBtnSpd > now) {
+      lastTimeBtnSpd = 0;
+    }
+    if (lastTimeBtnAxis > now) {
+      lastTimeBtnAxis = 0;
+    }
+
+    btn1Sts = !gpio_get(PIN_BTN1);
+    if (lastBtn1Sts != btn1Sts) {
+      if (lastTimeBtn1 + INTERVAL_BTN > now) {
+        btn1Sts = lastBtn1Sts;
+      } else {
+        lastTimeBtn1 = now;
+      }
+    }
+
+    btn2Sts = !gpio_get(PIN_BTN2);
+    if (lastBtn2Sts != btn2Sts) {
+      if (lastTimeBtn2 + INTERVAL_BTN > now) {
+        btn2Sts = lastBtn2Sts;
+      } else {
+        lastTimeBtn2 = now;
+      }
+    }
+
+    btn3Sts = !gpio_get(PIN_BTN3);
+    if (lastBtn3Sts != btn3Sts) {
+      if (lastTimeBtn3 + INTERVAL_BTN > now) {
+        btn3Sts = lastBtn3Sts;
+      } else {
+        lastTimeBtn3 = now;
+      }
+    }
+
+    btnSpdSts = !gpio_get(PIN_BTNSPD);
+    if (lastBtnSpdSts != btnSpdSts) {
+      if (lastTimeBtnSpd + INTERVAL_BTN > now) {
+        btnSpdSts = lastBtnSpdSts;
+      } else {
+        lastTimeBtnSpd = now;
+        if (!btnSpdSts) {
+          if (!speedComboConsumed) {
+            mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
+            mouseStep = mouseStepTable[mouseStepIdx];
+          }
+          speedComboActive = false;
+          speedComboConsumed = false;
+        }
+      }
+    }
+
+    btnAxisSts = !gpio_get(PIN_BTNAXIS);
+    if (lastBtnAxisSts != btnAxisSts) {
+      if (lastTimeBtnAxis + INTERVAL_BTN > now) {
+        btnAxisSts = lastBtnAxisSts;
+      } else {
+        lastTimeBtnAxis = now;
+        if (btnAxisSts) {
+          axisAlt = !axisAlt;
+        }
+      }
+    }
+
+    if (!speedComboActive && btnSpdSts && (btn1Sts || btn2Sts || btn3Sts)) {
+      speedComboActive = true;
+      speedComboConsumed = true;
+      if (btn1Sts) {
+        btn1AutoFire = !btn1AutoFire;
+      } else if (btn2Sts) {
+        btn2AutoFire = !btn2AutoFire;
+      } else if (btn3Sts) {
+        btn3AutoFire = !btn3AutoFire;
+      }
+    }
+
+    uint8_t outBtn1 = btn1Sts;
+    uint8_t outBtn2 = btn2Sts;
+    uint8_t outBtn3 = btn3Sts;
+
+    if (speedComboActive) {
+      outBtn1 = 0;
+      outBtn2 = 0;
+      outBtn3 = 0;
+    }
+
+    uint8_t btn1AutoFireOutput = 0;
+    uint8_t btn2AutoFireOutput = 0;
+    uint8_t btn3AutoFireOutput = 0;
+
+    if (btn1AutoFire && outBtn1) {
+      if (now - lastAutoFireBtn1 >= AUTO_FIRE_INTERVAL) {
+        autoFireStateBtn1 = !autoFireStateBtn1;
+        lastAutoFireBtn1 = now;
+      }
+      btn1AutoFireOutput = autoFireStateBtn1;
+    } else {
+      lastAutoFireBtn1 = now;
+      autoFireStateBtn1 = false;
+    }
+
+    if (btn2AutoFire && outBtn2) {
+      if (now - lastAutoFireBtn2 >= AUTO_FIRE_INTERVAL) {
+        autoFireStateBtn2 = !autoFireStateBtn2;
+        lastAutoFireBtn2 = now;
+      }
+      btn2AutoFireOutput = autoFireStateBtn2;
+    } else {
+      lastAutoFireBtn2 = now;
+      autoFireStateBtn2 = false;
+    }
+
+    if (btn3AutoFire && outBtn3) {
+      if (now - lastAutoFireBtn3 >= AUTO_FIRE_INTERVAL) {
+        autoFireStateBtn3 = !autoFireStateBtn3;
+        lastAutoFireBtn3 = now;
+      }
+      btn3AutoFireOutput = autoFireStateBtn3;
+    } else {
+      lastAutoFireBtn3 = now;
+      autoFireStateBtn3 = false;
+    }
+
+    uint8_t finalBtn1 = btn1AutoFire ? btn1AutoFireOutput : outBtn1;
+    uint8_t finalBtn2 = btn2AutoFire ? btn2AutoFireOutput : outBtn2;
+    uint8_t finalBtn3 = btn3AutoFire ? btn3AutoFireOutput : outBtn3;
+    uint8_t finalButtons = finalBtn1 | finalBtn2 << 1 | finalBtn3 << 2;
+
+    publishReportState(finalButtons, axisAlt);
+
+    lastBtn1Sts = btn1Sts;
+    lastBtn2Sts = btn2Sts;
+    lastBtn3Sts = btn3Sts;
+    lastBtnAxisSts = btnAxisSts;
+    lastBtnSpdSts = btnSpdSts;
   }
 }
 
@@ -126,8 +284,8 @@ void setup() {
   pinMode(PIN_BTNSPD, INPUT_PULLUP);
   pinMode(PIN_BTNAXIS, INPUT_PULLUP);
 
-  // 起動時にボタンが同時に押されている場合は、マウスの移動量を遅くする
-  if (!digitalRead(PIN_BTN1) && !digitalRead(PIN_BTN2)) {
+  // 起動時にボタンが同時に押されている場合は、低速モードにする
+  if (!gpio_get(PIN_BTN1) && !gpio_get(PIN_BTN2)) {
     mouseStepIdx = sizeof(mouseStepTable) - 1;
     mouseStep = mouseStepTable[mouseStepIdx];
   }
@@ -135,174 +293,81 @@ void setup() {
   TinyUSB_Device_Init(0);
   usb_hid.begin();
 
+  critical_section_init(&reportStateCs);
+  publishReportState(0, false);
+
   attachInterrupt(PIN_S1, paddleIr, FALLING);
   attachInterrupt(PIN_S2, paddleIr, FALLING);
+
+  multicore_launch_core1(core1Task);
 }
 
 void loop() {
-  now = micros();
-  if (lastTime > now) {
-    lastTime = 0;
-  }
-  if (lastTimeBtn1 > now) {
-    lastTimeBtn1 = 0;
-  }
-  if (lastTimeBtn2 > now) {
-    lastTimeBtn2 = 0;
-  }
-  if (lastTimeBtn3 > now) {
-    lastTimeBtn3 = 0;
-  }
-  if (lastTimeBtnSpd > now) {
-    lastTimeBtnSpd = 0;
-  }
-  if (lastTimeBtnAxis > now) {
-    lastTimeBtnAxis = 0;
+  static unsigned long nextReportUs = 0;
+  static bool reportPending = false;
+  static bool hasLastSentReport = false;
+  static int8_t lastSentStepValue = 0;
+  static uint8_t lastSentButtons = 0;
+  static bool lastSentAxisAlt = false;
+  unsigned long now = micros();
+
+  if (nextReportUs == 0) {
+    nextReportUs = now + REPORT_INTERVAL_US;
   }
 
-  btn1Sts = !digitalRead(PIN_BTN1);
-  if (lastBtn1Sts != btn1Sts) {
-    if (lastTimeBtn1 + INTERVAL_BTN > now) {
-      btn1Sts = lastBtn1Sts;
-    } else {
-      lastTimeBtn1 = now;
-    }
+  if ((long)(now - nextReportUs) >= 0) {
+    do {
+      nextReportUs += REPORT_INTERVAL_US;
+    } while ((long)(now - nextReportUs) >= 0);
+    reportPending = true;
   }
 
-  btn2Sts = !digitalRead(PIN_BTN2);
-  if (lastBtn2Sts != btn2Sts) {
-    if (lastTimeBtn2 + INTERVAL_BTN > now) {
-      btn2Sts = lastBtn2Sts;
-    } else {
-      lastTimeBtn2 = now;
-    }
+  if (!reportPending) {
+    return;
   }
 
-  btn3Sts = !digitalRead(PIN_BTN3);
-  if (lastBtn3Sts != btn3Sts) {
-    if (lastTimeBtn3 + INTERVAL_BTN > now) {
-      btn3Sts = lastBtn3Sts;
-    } else {
-      lastTimeBtn3 = now;
-    }
-  }
+  int16_t pendingCnt;
+  noInterrupts();
+  pendingCnt = cnt;
+  interrupts();
+  int8_t stepValue = toMouseDelta(pendingCnt);
 
-  btnSpdSts = !digitalRead(PIN_BTNSPD);
-  if (lastBtnSpdSts != btnSpdSts) {
-    if (lastTimeBtnSpd + INTERVAL_BTN > now) {
-      btnSpdSts = lastBtnSpdSts;
-    } else {
-      lastTimeBtnSpd = now;
-      if (!btnSpdSts) {
-        if (!speedComboConsumed) {
-          mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
-          mouseStep = mouseStepTable[mouseStepIdx];
-        }
-        speedComboActive = false;
-        speedComboConsumed = false;
-      }
-    }
-  }
+  uint8_t reportButtons;
+  bool reportAxisAlt;
+  critical_section_enter_blocking(&reportStateCs);
+  reportButtons = sharedButtons;
+  reportAxisAlt = sharedAxisAlt;
+  critical_section_exit(&reportStateCs);
 
-  btnAxisSts = !digitalRead(PIN_BTNAXIS);
-  if (lastBtnAxisSts != btnAxisSts) {
-    if (lastTimeBtnAxis + INTERVAL_BTN > now) {
-      btnAxisSts = lastBtnAxisSts;
-    } else {
-      lastTimeBtnAxis = now;
-      if (btnAxisSts) {
-        axisAlt = !axisAlt;
-      }
-    }
-  }
-
-  // 平滑化された値をマウスレポートに使用
-  int8_t smoothedValue = toMouseDelta(smoothedCnt);
-  
-  if (axisAlt) {
+  mouse_report.buttons = reportButtons;
+  if (reportAxisAlt) {
     mouse_report.x = 0;
-    mouse_report.y = smoothedValue;
+    mouse_report.y = stepValue;
   } else {
-    mouse_report.x = smoothedValue;
+    mouse_report.x = stepValue;
     mouse_report.y = 0;
   }
 
-  if (!speedComboActive && btnSpdSts && (btn1Sts || btn2Sts || btn3Sts)) {
-    speedComboActive = true;
-    speedComboConsumed = true;
-    if (btn1Sts) {
-      btn1AutoFire = !btn1AutoFire;
-    } else if (btn2Sts) {
-      btn2AutoFire = !btn2AutoFire;
-    } else if (btn3Sts) {
-      btn3AutoFire = !btn3AutoFire;
-    }
+  bool reportChanged = !hasLastSentReport ||
+                       (stepValue != lastSentStepValue) ||
+                       (reportButtons != lastSentButtons) ||
+                       (reportAxisAlt != lastSentAxisAlt);
+
+  if (!reportChanged) {
+    reportPending = false;
+    return;
   }
-
-  uint8_t outBtn1 = btn1Sts;
-  uint8_t outBtn2 = btn2Sts;
-  uint8_t outBtn3 = btn3Sts;
-
-  if (speedComboActive) {
-    outBtn1 = 0;
-    outBtn2 = 0;
-    outBtn3 = 0;
-  }
-
-  // オートファイア処理
-  uint8_t btn1AutoFireOutput = 0;
-  uint8_t btn2AutoFireOutput = 0;
-  uint8_t btn3AutoFireOutput = 0;
-
-  if (btn1AutoFire && outBtn1) {
-    if (now - lastAutoFireBtn1 >= AUTO_FIRE_INTERVAL) {
-      autoFireStateBtn1 = !autoFireStateBtn1;
-      lastAutoFireBtn1 = now;
-    }
-    btn1AutoFireOutput = autoFireStateBtn1;
-  } else {
-    lastAutoFireBtn1 = now;
-    autoFireStateBtn1 = false;
-  }
-
-  if (btn2AutoFire && outBtn2) {
-    if (now - lastAutoFireBtn2 >= AUTO_FIRE_INTERVAL) {
-      autoFireStateBtn2 = !autoFireStateBtn2;
-      lastAutoFireBtn2 = now;
-    }
-    btn2AutoFireOutput = autoFireStateBtn2;
-  } else {
-    lastAutoFireBtn2 = now;
-    autoFireStateBtn2 = false;
-  }
-
-  if (btn3AutoFire && outBtn3) {
-    if (now - lastAutoFireBtn3 >= AUTO_FIRE_INTERVAL) {
-      autoFireStateBtn3 = !autoFireStateBtn3;
-      lastAutoFireBtn3 = now;
-    }
-    btn3AutoFireOutput = autoFireStateBtn3;
-  } else {
-    lastAutoFireBtn3 = now;
-    autoFireStateBtn3 = false;
-  }
-
-  uint8_t finalBtn1 = btn1AutoFire ? btn1AutoFireOutput : outBtn1;
-  uint8_t finalBtn2 = btn2AutoFire ? btn2AutoFireOutput : outBtn2;
-  uint8_t finalBtn3 = btn3AutoFire ? btn3AutoFireOutput : outBtn3;
-
-  mouse_report.buttons = finalBtn1 | finalBtn2 << 1 | finalBtn3 << 2;
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
     usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
-    cnt -= (float)smoothedValue;
-    smoothedCnt -= (float)smoothedValue;
+    noInterrupts();
+    cnt -= stepValue;
+    interrupts();
+    hasLastSentReport = true;
+    lastSentStepValue = stepValue;
+    lastSentButtons = reportButtons;
+    lastSentAxisAlt = reportAxisAlt;
+    reportPending = false;
   }
-
-  lastBtn1Sts = btn1Sts;
-  lastBtn2Sts = btn2Sts;
-  lastBtn3Sts = btn3Sts;
-  lastBtnAxisSts = btnAxisSts;
-  lastBtnSpdSts = btnSpdSts;
 }
 
