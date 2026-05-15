@@ -322,10 +322,6 @@ void loop() {
     reportPending = true;
   }
 
-  if (!reportPending) {
-    return;
-  }
-
   int16_t pendingCnt;
   noInterrupts();
   pendingCnt = cnt;
@@ -353,6 +349,14 @@ void loop() {
                        (reportButtons != lastSentButtons) ||
                        (reportAxisAlt != lastSentAxisAlt);
 
+  if (reportChanged) {
+    reportPending = true;
+  }
+
+  if (!reportPending) {
+    return;
+  }
+
   if (!reportChanged) {
     reportPending = false;
     return;
@@ -367,6 +371,7 @@ void loop() {
     lastSentStepValue = stepValue;
     lastSentButtons = reportButtons;
     lastSentAxisAlt = reportAxisAlt;
+    nextReportUs = now + REPORT_INTERVAL_US;
     reportPending = false;
   }
 }
