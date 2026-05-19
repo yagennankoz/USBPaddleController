@@ -15,7 +15,7 @@
 #define DIR_RIGHT   (1u)
 #define DIR_LEFT    (2u)
 
-#define INTERVAL      (2000u)
+#define INTERVAL      (1000u)
 #define INTERVAL_BTN  (10000u)
 
 #define MY_TUD_HID_REPORT_DESC_MOUSE(...) \

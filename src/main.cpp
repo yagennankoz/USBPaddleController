@@ -13,7 +13,7 @@ uint8_t const desc_hid_report[] =
 Adafruit_USBD_HID usb_hid(desc_hid_report, sizeof(desc_hid_report), HID_ITF_PROTOCOL_NONE, 1, false);
 my_hid_mouse_report_t   mouse_report;
 
-// uint8_t lastLastSts;
+uint8_t lastLastSts;
 uint8_t lastSts;
 uint8_t sts;
 uint8_t xorSts;
@@ -86,12 +86,13 @@ void paddleIr() {
 
   if (inertial && lastTime + INTERVAL < now) {
     dir = DIR_N;
+    inertial = false;
   }
 
   xorSts = lastSts xor sts;
   if (xorSts == 3) {
-    // 両方のスイッチが同時に変化した場合は、異常として無視する
-    /*
+    // 左右切り返したときに誤検知することがあるが気にしないことにする
+    // ここをやめると動きがカクつくことがある
     if (lastLastSts == lastSts) {
       dir = DIR_N;
     }
@@ -102,7 +103,6 @@ void paddleIr() {
       cnt -= mouseStep;
       inertial = true;
     }
-    */
   } else if (xorSts == 1) {
     if (dir == DIR_LEFT) {
       cnt = 0;
@@ -119,7 +119,7 @@ void paddleIr() {
     cnt -= mouseStep;
   }
 
-//   lastLastSts = lastSts;
+  lastLastSts = lastSts;
   lastSts = sts;
   lastTime = now;
 }
