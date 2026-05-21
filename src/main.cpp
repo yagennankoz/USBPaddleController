@@ -3,6 +3,7 @@
 #include <pico/multicore.h>
 #include <pico/critical_section.h>
 #include <SPI.h>
+#include <EEPROM.h>
 #include <Adafruit_TinyUSB.h>
 #include <define.hpp>
 
@@ -56,10 +57,82 @@ int16_t mouseStepIdx = 0;
 int16_t mouseStep = mouseStepTable[mouseStepIdx];
 
 critical_section_t reportStateCs;
+critical_section_t settingsSaveCs;
 volatile uint8_t sharedButtons = 0;
 volatile bool sharedAxisAlt = false;
+volatile bool settingsSaveRequested = false;
 
 const unsigned long REPORT_INTERVAL_US = 1000u;
+const int EEPROM_SIZE_BYTES = 64;
+
+struct DeviceSettings {
+  uint8_t magic;
+  uint8_t version;
+  uint8_t speedIndex;
+  uint8_t autoFireFlags;
+  uint8_t reserved;
+  uint8_t checksum;
+};
+
+uint8_t calcSettingsChecksum(const DeviceSettings& settings) {
+  return settings.magic ^ settings.version ^ settings.speedIndex ^ settings.autoFireFlags ^ settings.reserved;
+}
+
+void saveSettingsToNand() {
+  DeviceSettings settings = {
+    SETTINGS_MAGIC,
+    SETTINGS_VERSION,
+    (uint8_t)mouseStepIdx,
+    (uint8_t)((btn1AutoFire ? 0x01 : 0x00) |
+              (btn2AutoFire ? 0x02 : 0x00) |
+              (btn3AutoFire ? 0x04 : 0x00)),
+    0,
+    0
+  };
+  settings.checksum = calcSettingsChecksum(settings);
+
+  // RP2040はフラッシュ書き込み中に他コア実行が干渉すると停止することがあるため、
+  // 保存中だけもう一方のコアをロックアウトする。
+  multicore_lockout_start_blocking();
+  EEPROM.put(0, settings);
+  EEPROM.commit();
+  multicore_lockout_end_blocking();
+}
+
+void requestSettingsSave() {
+  critical_section_enter_blocking(&settingsSaveCs);
+  settingsSaveRequested = true;
+  critical_section_exit(&settingsSaveCs);
+}
+
+bool consumeSettingsSaveRequest() {
+  bool requested;
+  critical_section_enter_blocking(&settingsSaveCs);
+  requested = settingsSaveRequested;
+  settingsSaveRequested = false;
+  critical_section_exit(&settingsSaveCs);
+  return requested;
+}
+
+void loadSettingsFromNand() {
+  DeviceSettings settings;
+  EEPROM.get(0, settings);
+
+  if (settings.magic != SETTINGS_MAGIC ||
+      settings.version != SETTINGS_VERSION ||
+      settings.checksum != calcSettingsChecksum(settings)) {
+    return;
+  }
+
+  if (settings.speedIndex < sizeof(mouseStepTable)) {
+    mouseStepIdx = settings.speedIndex;
+    mouseStep = mouseStepTable[mouseStepIdx];
+  }
+
+  btn1AutoFire = (settings.autoFireFlags & 0x01) != 0;
+  btn2AutoFire = (settings.autoFireFlags & 0x02) != 0;
+  btn3AutoFire = (settings.autoFireFlags & 0x04) != 0;
+}
 
 int8_t toMouseDelta(int16_t value) {
   if (value > 127) {
@@ -125,6 +198,10 @@ void paddleIr() {
 }
 
 void core1Task() {
+  // multicore_lockout_start_blocking() を使うため、
+  // ロックアウト対象コア側の初期化を行う。
+  multicore_lockout_victim_init();
+
   while (true) {
     unsigned long now = micros();
     if (lastTimeBtn1 > now) {
@@ -180,6 +257,7 @@ void core1Task() {
           if (!speedComboConsumed) {
             mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
             mouseStep = mouseStepTable[mouseStepIdx];
+            requestSettingsSave();
           }
           speedComboActive = false;
           speedComboConsumed = false;
@@ -204,10 +282,13 @@ void core1Task() {
       speedComboConsumed = true;
       if (btn1Sts) {
         btn1AutoFire = !btn1AutoFire;
+        requestSettingsSave();
       } else if (btn2Sts) {
         btn2AutoFire = !btn2AutoFire;
+        requestSettingsSave();
       } else if (btn3Sts) {
         btn3AutoFire = !btn3AutoFire;
+        requestSettingsSave();
       }
     }
 
@@ -276,6 +357,12 @@ void core1Task() {
 void setup() {
   cnt = 0;
 
+  EEPROM.begin(EEPROM_SIZE_BYTES);
+  loadSettingsFromNand();
+
+  // X/Y軸は常に起動時にX軸へ戻す
+  axisAlt = false;
+
   pinMode(PIN_S1, INPUT_PULLUP);
   pinMode(PIN_S2, INPUT_PULLUP);
   pinMode(PIN_BTN1, INPUT_PULLUP);
@@ -294,6 +381,7 @@ void setup() {
   usb_hid.begin();
 
   critical_section_init(&reportStateCs);
+  critical_section_init(&settingsSaveCs);
   publishReportState(0, false);
 
   attachInterrupt(PIN_S1, paddleIr, FALLING);
@@ -313,6 +401,10 @@ void loop() {
 
   if (nextReportUs == 0) {
     nextReportUs = now + REPORT_INTERVAL_US;
+  }
+
+  if (consumeSettingsSaveRequest()) {
+    saveSettingsToNand();
   }
 
   if ((long)(now - nextReportUs) >= 0) {

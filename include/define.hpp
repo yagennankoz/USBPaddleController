@@ -60,3 +60,6 @@ typedef struct MY_TU_ATTR_PACKED
 const int8_t mouseStepTable[] = {8, 6, 4, 2};
 
 const unsigned long AUTO_FIRE_INTERVAL = 50000u; // 連射インターバル (マイクロ秒)
+
+const uint8_t SETTINGS_MAGIC = 0xA5;
+const uint8_t SETTINGS_VERSION = 1;
