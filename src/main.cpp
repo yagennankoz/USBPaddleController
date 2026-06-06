@@ -1,11 +1,13 @@
 #include <Arduino.h>
 #include <hardware/gpio.h>
+#include <hardware/pio.h>
 #include <pico/multicore.h>
 #include <pico/critical_section.h>
 #include <SPI.h>
 #include <EEPROM.h>
 #include <Adafruit_TinyUSB.h>
 #include <define.hpp>
+#include "s1s2_encoder.pio.h"
 
 uint8_t const desc_hid_report[] =
 {
@@ -14,12 +16,6 @@ uint8_t const desc_hid_report[] =
 Adafruit_USBD_HID usb_hid(desc_hid_report, sizeof(desc_hid_report), HID_ITF_PROTOCOL_NONE, 1, false);
 my_hid_mouse_report_t   mouse_report;
 
-uint8_t lastLastSts;
-uint8_t lastSts;
-uint8_t sts;
-uint8_t xorSts;
-uint8_t dir;
-bool inertial = false;
 bool axisAlt = false;
 
 uint8_t lastBtn1Sts;
@@ -45,7 +41,6 @@ unsigned long lastAutoFireBtn1 = 0;
 unsigned long lastAutoFireBtn2 = 0;
 unsigned long lastAutoFireBtn3 = 0;
 
-unsigned long lastTime = micros();
 unsigned long lastTimeBtn1 = micros();
 unsigned long lastTimeBtn2 = micros();
 unsigned long lastTimeBtn3 = micros();
@@ -55,6 +50,11 @@ unsigned long lastTimeBtnSpd = micros();
 int16_t cnt;
 int16_t mouseStepIdx = 0;
 int16_t mouseStep = mouseStepTable[mouseStepIdx];
+
+PIO s1s2Pio = pio0;
+uint s1s2Sm = 0;
+uint s1s2ProgramOffset = 0;
+uint8_t s1s2LastSts = 0;
 
 critical_section_t reportStateCs;
 critical_section_t settingsSaveCs;
@@ -151,50 +151,42 @@ void publishReportState(uint8_t buttons, bool axisIsAlt) {
   critical_section_exit(&reportStateCs);
 }
 
-void paddleIr() {
-  sts = gpio_get(PIN_S1) << 1 | gpio_get(PIN_S2);
+void initS1S2Pio() {
+  s1s2ProgramOffset = pio_add_program(s1s2Pio, &s1s2_encoder_program);
+  pio_sm_config config = s1s2_encoder_program_get_default_config(s1s2ProgramOffset);
+  sm_config_set_in_pins(&config, PIN_S2);
+  sm_config_set_in_shift(&config, false, false, 32);
 
-  unsigned long now = micros();
-  if (now < lastTime) lastTime = 0;
+  pio_gpio_init(s1s2Pio, PIN_S2);
+  pio_gpio_init(s1s2Pio, PIN_S1);
+  gpio_pull_up(PIN_S2);
+  gpio_pull_up(PIN_S1);
+  pio_sm_set_consecutive_pindirs(s1s2Pio, s1s2Sm, PIN_S2, 2, false);
 
-  if (inertial && lastTime + INTERVAL < now) {
-    dir = DIR_N;
-    inertial = false;
+  pio_sm_init(s1s2Pio, s1s2Sm, s1s2ProgramOffset, &config);
+  pio_sm_set_enabled(s1s2Pio, s1s2Sm, true);
+
+  s1s2LastSts = (gpio_get(PIN_S1) << 1) | gpio_get(PIN_S2);
+}
+
+void consumeS1S2Pio() {
+  static const int8_t transitionTable[16] = {
+    0, -1, 1, 0,
+    1, 0, 0, -1,
+    -1, 0, 0, 1,
+    0, 1, -1, 0,
+  };
+
+  while (!pio_sm_is_rx_fifo_empty(s1s2Pio, s1s2Sm)) {
+    uint8_t newSts = (uint8_t)(pio_sm_get(s1s2Pio, s1s2Sm) & 0x03);
+    uint8_t transition = (uint8_t)((s1s2LastSts << 2) | newSts);
+    int8_t delta = transitionTable[transition];
+
+    if (delta != 0) {
+      cnt += delta;
+    }
+    s1s2LastSts = newSts;
   }
-
-  xorSts = lastSts xor sts;
-  if (xorSts == 3) {
-    // 左右切り返したときに誤検知することがあるが気にしないことにする
-    // ここをやめると動きがカクつくことがある
-    if (lastLastSts == lastSts) {
-      dir = DIR_N;
-    }
-    if (dir == DIR_RIGHT) {
-      cnt += mouseStep;
-      inertial = true;
-    } else if (dir == DIR_LEFT) {
-      cnt -= mouseStep;
-      inertial = true;
-    }
-  } else if (xorSts == 1) {
-    if (dir == DIR_LEFT) {
-      cnt = 0;
-    }
-    dir = DIR_RIGHT;
-    inertial = false;
-    cnt += mouseStep;
-  } else {
-    if (dir == DIR_RIGHT) {
-      cnt = 0;
-    }
-    dir = DIR_LEFT;
-    inertial = false;
-    cnt -= mouseStep;
-  }
-
-  lastLastSts = lastSts;
-  lastSts = sts;
-  lastTime = now;
 }
 
 void core1Task() {
@@ -384,8 +376,7 @@ void setup() {
   critical_section_init(&settingsSaveCs);
   publishReportState(0, false);
 
-  attachInterrupt(PIN_S1, paddleIr, FALLING);
-  attachInterrupt(PIN_S2, paddleIr, FALLING);
+  initS1S2Pio();
 
   multicore_launch_core1(core1Task);
 }
@@ -414,11 +405,14 @@ void loop() {
     reportPending = true;
   }
 
+  consumeS1S2Pio();
+
   int16_t pendingCnt;
   noInterrupts();
   pendingCnt = cnt;
   interrupts();
-  int8_t stepValue = toMouseDelta(pendingCnt);
+  int16_t scaledCnt = pendingCnt * mouseStep;
+  int8_t stepValue = toMouseDelta(scaledCnt);
 
   uint8_t reportButtons;
   bool reportAxisAlt;
@@ -456,8 +450,9 @@ void loop() {
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
     usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
+    int16_t consumedTicks = (mouseStep != 0) ? ((int16_t)stepValue / mouseStep) : stepValue;
     noInterrupts();
-    cnt -= stepValue;
+    cnt -= consumedTicks;
     interrupts();
     hasLastSentReport = true;
     lastSentStepValue = stepValue;

@@ -1,0 +1,23 @@
+.program s1s2_encoder
+
+; S1/S2(2bit) の変化だけを RX FIFO に通知する
+; in pins, 2 の入力順は in_base=PIN_S2 を前提に bit0=S2, bit1=S1
+
+    mov isr, null
+    in pins, 2
+    mov x, isr
+
+.wrap_target
+loop:
+    mov isr, null
+    in pins, 2
+    mov y, isr
+    jmp x != y, changed
+    jmp loop
+
+changed:
+    mov isr, y
+    push noblock
+    mov x, y
+    jmp loop
+.wrap
