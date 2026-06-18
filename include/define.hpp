@@ -18,6 +18,113 @@
 #define INTERVAL      (1000u)
 #define INTERVAL_BTN  (10000u)
 
+#define OUT_PAD_SQUARE (1u << 0)
+#define OUT_PAD_CROSS (1u << 1)
+#define OUT_PAD_CIRCLE (1u << 2)
+#define OUT_PAD_TRIANGLE (1u << 3)
+#define OUT_PAD_R2 (1u << 7)
+#define OUT_PAD_OPTIONS (1u << 9) // 0x1000
+
+typedef struct
+{
+  const char *product;
+} UsbIdentityProfile;
+
+// USB VID/PID profile IDs used by keyAssign[].usbProfile.
+enum
+{
+  USB_ID_PROFILE_MOUSE = 0,
+  USB_ID_PROFILE_GAMEPAD,
+  USB_ID_PROFILE_MAX
+};
+
+// USB identity table indexed by USB_ID_PROFILE_*.
+const UsbIdentityProfile usbIdentityProfiles[USB_ID_PROFILE_MAX] = {
+    {"PADDLE CONTROLLER"},
+    {"POLE POSITION PADDLE"},
+};
+
+#define MY_TUD_HID_REPORT_DESC_GAMEPAD(...)                           \
+    HID_USAGE_PAGE(HID_USAGE_PAGE_DESKTOP),                                 \
+    HID_USAGE(HID_USAGE_DESKTOP_GAMEPAD),                               \
+    HID_COLLECTION(HID_COLLECTION_APPLICATION), /* Report ID if any */  \
+      __VA_ARGS__                                                         \
+          HID_LOGICAL_MIN(0),                                             \
+      HID_LOGICAL_MAX(1),                                                 \
+      HID_PHYSICAL_MIN(0),                                                \
+      HID_PHYSICAL_MAX(1),                                                \
+      HID_REPORT_SIZE(1),                                                 \
+      HID_REPORT_COUNT(13),                                               \
+      HID_USAGE_PAGE(HID_USAGE_PAGE_BUTTON),                              \
+      HID_USAGE_MIN(1),                                                   \
+      HID_USAGE_MAX(13),                                                  \
+      HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                  \
+      HID_REPORT_COUNT(3),                                                \
+      HID_INPUT(HID_CONSTANT | HID_ARRAY | HID_ABSOLUTE),                 \
+      HID_USAGE_PAGE(HID_USAGE_PAGE_DESKTOP),                             \
+      HID_LOGICAL_MAX(7),                                                 \
+      HID_PHYSICAL_MAX_N(315, 2),                                         \
+      HID_REPORT_SIZE(4),                                                 \
+      HID_REPORT_COUNT(1),                                                \
+      HID_UNIT(0x14),                                                     \
+      HID_USAGE(HID_USAGE_DESKTOP_HAT_SWITCH),                            \
+      HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE | HID_NULL_STATE), \
+      HID_UNIT(0),                                                        \
+      HID_REPORT_COUNT(1),                                                \
+      HID_INPUT(HID_CONSTANT | HID_ARRAY | HID_ABSOLUTE),                 \
+      HID_LOGICAL_MAX_N(0xff, 2),                                         \
+      HID_PHYSICAL_MAX_N(0xff, 2),                                        \
+      HID_USAGE(HID_USAGE_DESKTOP_X),                                     \
+      HID_USAGE(HID_USAGE_DESKTOP_Y),                                     \
+      HID_USAGE(HID_USAGE_DESKTOP_Z),                                     \
+      HID_USAGE(HID_USAGE_DESKTOP_RZ),                                    \
+      HID_REPORT_SIZE(8),                                                 \
+      HID_REPORT_COUNT(4),                                                \
+      HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                  \
+      HID_USAGE_PAGE_N(0xFF00, 2),                                        \
+      HID_USAGE(0x20),                                                    \
+      HID_USAGE(0x21),                                                    \
+      HID_USAGE(0x22),                                                    \
+      HID_USAGE(0x23),                                                    \
+      HID_USAGE(0x24),                                                    \
+      HID_USAGE(0x25),                                                    \
+      HID_USAGE(0x26),                                                    \
+      HID_USAGE(0x27),                                                    \
+      HID_USAGE(0x28),                                                    \
+      HID_USAGE(0x29),                                                    \
+      HID_USAGE(0x2A),                                                    \
+      HID_USAGE(0x2B),                                                    \
+      HID_REPORT_COUNT(12),                                               \
+      HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                  \
+      HID_USAGE_N(0x2126, 2),                                             \
+      HID_REPORT_COUNT(8),                                                \
+      HID_FEATURE(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                \
+      HID_USAGE_N(0x2126, 2),                                             \
+      HID_OUTPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                 \
+      HID_LOGICAL_MAX_N(1023, 2),                                         \
+      HID_PHYSICAL_MAX_N(1023, 2),                                        \
+      HID_USAGE(0x2C),                                                    \
+      HID_USAGE(0x2D),                                                    \
+      HID_USAGE(0x2E),                                                    \
+      HID_USAGE(0x2F),                                                    \
+      HID_REPORT_SIZE(16),                                                \
+      HID_REPORT_COUNT(4),                                                \
+      HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                  \
+    HID_COLLECTION_END
+
+
+typedef struct __attribute__((packed))
+{
+  uint16_t buttons;       ///< 13 buttons + 3 padding bits
+  uint8_t hat;            ///< Hat switch + 4 padding bits
+  uint8_t x;              ///< Gamepad X axis (0-255)
+  uint8_t y;              ///< Gamepad Y axis (0-255)
+  uint8_t z;              ///< Gamepad Z axis (0-255)
+  uint8_t rz;             ///< Gamepad RZ axis (0-255)
+  uint8_t vendorInput[12];///< Vendor-defined input bytes
+  uint16_t analog[4];     ///< Additional 16-bit analog inputs
+} joykey_hid_gamepad_report_t;
+
 #define MY_TUD_HID_REPORT_DESC_MOUSE(...) \
     HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP     )                 ,\
     HID_USAGE      ( HID_USAGE_DESKTOP_MOUSE    )                 ,\
@@ -26,31 +133,31 @@
         __VA_ARGS__ \
         HID_USAGE          ( HID_USAGE_DESKTOP_POINTER              ) ,\
         HID_COLLECTION     ( HID_COLLECTION_PHYSICAL                ) ,\
-        /* Button Map */ \
-        HID_USAGE_PAGE     ( HID_USAGE_PAGE_BUTTON                  ) ,\
-        HID_USAGE_MIN      ( 1                                      ) ,\
-        HID_USAGE_MAX      ( 3                                      ) ,\
-        HID_LOGICAL_MIN    ( 0x00                                   ) ,\
-        HID_LOGICAL_MAX    ( 0x01                                   ) ,\
-        HID_REPORT_COUNT   ( 3                                      ) ,\
-        HID_REPORT_SIZE    ( 1                                      ) ,\
-        HID_INPUT          ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ) ,\
-        HID_REPORT_COUNT   ( 1                                      ) ,\
-        HID_REPORT_SIZE    ( 5                                      ) ,\
-        HID_INPUT          ( HID_CONSTANT | HID_ARRAY | HID_ABSOLUTE ) ,\
-        /* X, Y */ \
-        HID_USAGE_PAGE     ( HID_USAGE_PAGE_DESKTOP                 ) ,\
-        HID_USAGE          ( HID_USAGE_DESKTOP_X                    ) ,\
-        HID_USAGE          ( HID_USAGE_DESKTOP_Y                    ) ,\
-        HID_LOGICAL_MIN    ( 0x81                                   ) ,\
-        HID_LOGICAL_MAX    ( 0x7f                                   ) ,\
-        HID_REPORT_SIZE    ( 8                                      ) ,\
-        HID_REPORT_COUNT   ( 2                                      ) ,\
-        HID_INPUT          ( HID_DATA | HID_VARIABLE | HID_RELATIVE ) ,\
-    HID_COLLECTION_END ,\
-HID_COLLECTION_END
+            /* Button Map */ \
+            HID_USAGE_PAGE     ( HID_USAGE_PAGE_BUTTON                  ) ,\
+            HID_USAGE_MIN      ( 1                                      ) ,\
+            HID_USAGE_MAX      ( 3                                      ) ,\
+            HID_LOGICAL_MIN    ( 0x00                                   ) ,\
+            HID_LOGICAL_MAX    ( 0x01                                   ) ,\
+            HID_REPORT_COUNT   ( 3                                      ) ,\
+            HID_REPORT_SIZE    ( 1                                      ) ,\
+            HID_INPUT          ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ) ,\
+            HID_REPORT_COUNT   ( 1                                      ) ,\
+            HID_REPORT_SIZE    ( 5                                      ) ,\
+            HID_INPUT          ( HID_CONSTANT | HID_ARRAY | HID_ABSOLUTE ) ,\
+            /* X, Y */ \
+            HID_USAGE_PAGE     ( HID_USAGE_PAGE_DESKTOP                 ) ,\
+            HID_USAGE          ( HID_USAGE_DESKTOP_X                    ) ,\
+            HID_USAGE          ( HID_USAGE_DESKTOP_Y                    ) ,\
+            HID_LOGICAL_MIN    ( 0x81                                   ) ,\
+            HID_LOGICAL_MAX    ( 0x7f                                   ) ,\
+            HID_REPORT_SIZE    ( 8                                      ) ,\
+            HID_REPORT_COUNT   ( 2                                      ) ,\
+            HID_INPUT          ( HID_DATA | HID_VARIABLE | HID_RELATIVE ) ,\
+        HID_COLLECTION_END ,\
+    HID_COLLECTION_END
 
-typedef struct MY_TU_ATTR_PACKED
+typedef struct __attribute__((packed))
 {
   uint8_t   buttons;      ///< Buttons mask for currently pressed buttons
   int8_t    x;            ///< Delta x  movement of left analog-stick
@@ -62,4 +169,5 @@ const int8_t mouseStepTable[] = {8, 6, 4, 2};
 const unsigned long AUTO_FIRE_INTERVAL = 50000u; // 連射インターバル (マイクロ秒)
 
 const uint8_t SETTINGS_MAGIC = 0xA5;
-const uint8_t SETTINGS_VERSION = 1;
+const uint8_t SETTINGS_VERSION = 2;
+

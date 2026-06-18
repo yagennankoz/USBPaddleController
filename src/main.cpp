@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <hardware/gpio.h>
 #include <hardware/pio.h>
+#include <hardware/watchdog.h>
 #include <pico/multicore.h>
 #include <pico/critical_section.h>
 #include <SPI.h>
@@ -9,14 +10,30 @@
 #include <define.hpp>
 #include "s1s2_encoder.pio.h"
 
-uint8_t const desc_hid_report[] =
+uint8_t const desc_hid_report_mouse[] =
 {
     MY_TUD_HID_REPORT_DESC_MOUSE()
 };
-Adafruit_USBD_HID usb_hid(desc_hid_report, sizeof(desc_hid_report), HID_ITF_PROTOCOL_NONE, 1, false);
+uint8_t const desc_hid_report_gamepad[] =
+{
+  MY_TUD_HID_REPORT_DESC_GAMEPAD()
+};
+
+enum DeviceMode : uint8_t {
+  DEVICE_MODE_MOUSE = 0,
+  DEVICE_MODE_GAMEPAD,
+  DEVICE_MODE_MAX
+};
+
+Adafruit_USBD_HID usb_hid;
 my_hid_mouse_report_t   mouse_report;
+joykey_hid_gamepad_report_t gamepad_report;
 
 bool axisAlt = false;
+DeviceMode currentMode = DEVICE_MODE_MOUSE;
+
+uint8_t speedIndexByMode[DEVICE_MODE_MAX] = {0};
+uint8_t autoFireFlagsByMode[DEVICE_MODE_MAX] = {0};
 
 uint8_t lastBtn1Sts;
 uint8_t btn1Sts;
@@ -30,6 +47,7 @@ uint8_t lastBtnSpdSts;
 uint8_t btnSpdSts;
 bool speedComboActive = false;
 bool speedComboConsumed = false;
+bool modeSwitchComboActive = false;
 
 bool btn1AutoFire = false;
 bool btn2AutoFire = false;
@@ -58,37 +76,122 @@ uint8_t s1s2LastSts = 0;
 
 critical_section_t reportStateCs;
 critical_section_t settingsSaveCs;
+critical_section_t modeSwitchCs;
 volatile uint8_t sharedButtons = 0;
 volatile bool sharedAxisAlt = false;
 volatile bool settingsSaveRequested = false;
+volatile bool modeSwitchRequested = false;
 
 const unsigned long REPORT_INTERVAL_US = 1000u;
 const int EEPROM_SIZE_BYTES = 64;
+const uint8_t GAMEPAD_HAT_CENTER = 8;
 
 struct DeviceSettings {
   uint8_t magic;
   uint8_t version;
-  uint8_t speedIndex;
-  uint8_t autoFireFlags;
+  uint8_t currentMode;
+  uint8_t speedIndexByMode[DEVICE_MODE_MAX];
+  uint8_t autoFireFlagsByMode[DEVICE_MODE_MAX];
+  uint8_t mode;
   uint8_t reserved;
   uint8_t checksum;
 };
 
+static uint8_t const featureReport[8] = {0x21, 0x26, 0x02, 0x04, 0x00, 0x00, 0x00, 0x00};
+static uint8_t lastOutputReport[8] = {0};
+
+uint16_t hidPadGetReportCallback(uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen)
+{
+  (void)report_id;
+
+  if (report_type == HID_REPORT_TYPE_FEATURE)
+  {
+    uint16_t len = (reqlen < sizeof(featureReport)) ? reqlen : (uint16_t)sizeof(featureReport);
+    memcpy(buffer, featureReport, len);
+    return len;
+  }
+
+  return 0;
+}
+
+void hidPadSetReportCallback(uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize)
+{
+  (void)report_id;
+
+  if ((report_type == HID_REPORT_TYPE_OUTPUT || report_type == HID_REPORT_TYPE_FEATURE) && bufsize)
+  {
+    uint16_t len = (bufsize < sizeof(lastOutputReport)) ? bufsize : (uint16_t)sizeof(lastOutputReport);
+    memcpy(lastOutputReport, buffer, len);
+  }
+}
+
 uint8_t calcSettingsChecksum(const DeviceSettings& settings) {
-  return settings.magic ^ settings.version ^ settings.speedIndex ^ settings.autoFireFlags ^ settings.reserved;
+  uint8_t checksum = settings.magic ^ settings.version ^ settings.currentMode ^ settings.mode ^ settings.reserved;
+  for (uint8_t i = 0; i < DEVICE_MODE_MAX; ++i) {
+    checksum ^= settings.speedIndexByMode[i];
+    checksum ^= settings.autoFireFlagsByMode[i];
+  }
+  return checksum;
+}
+
+uint8_t getRuntimeAutoFireFlags() {
+  return (uint8_t)((btn1AutoFire ? 0x01 : 0x00) |
+                   (btn2AutoFire ? 0x02 : 0x00) |
+                   (btn3AutoFire ? 0x04 : 0x00));
+}
+
+void applyRuntimeAutoFireFlags(uint8_t flags) {
+  btn1AutoFire = (flags & 0x01) != 0;
+  btn2AutoFire = (flags & 0x02) != 0;
+  btn3AutoFire = (flags & 0x04) != 0;
+}
+
+void syncRuntimeSettingsToModeCache(DeviceMode mode) {
+  if (mode >= DEVICE_MODE_MAX) {
+    return;
+  }
+
+  uint8_t speedIndex = (mouseStepIdx >= 0) ? (uint8_t)mouseStepIdx : 0;
+  if (speedIndex >= sizeof(mouseStepTable)) {
+    speedIndex = 0;
+  }
+
+  speedIndexByMode[mode] = speedIndex;
+  autoFireFlagsByMode[mode] = getRuntimeAutoFireFlags();
+}
+
+void applyModeCacheToRuntimeSettings(DeviceMode mode) {
+  if (mode >= DEVICE_MODE_MAX) {
+    return;
+  }
+
+  uint8_t speedIndex = speedIndexByMode[mode];
+  if (speedIndex >= sizeof(mouseStepTable)) {
+    speedIndex = 0;
+  }
+
+  mouseStepIdx = speedIndex;
+  mouseStep = mouseStepTable[mouseStepIdx] * ((currentMode == DEVICE_MODE_GAMEPAD) ? 4 : 1);
+  applyRuntimeAutoFireFlags(autoFireFlagsByMode[mode]);
 }
 
 void saveSettingsToNand() {
+  syncRuntimeSettingsToModeCache(currentMode);
+
   DeviceSettings settings = {
     SETTINGS_MAGIC,
     SETTINGS_VERSION,
-    (uint8_t)mouseStepIdx,
-    (uint8_t)((btn1AutoFire ? 0x01 : 0x00) |
-              (btn2AutoFire ? 0x02 : 0x00) |
-              (btn3AutoFire ? 0x04 : 0x00)),
+    (uint8_t)currentMode,
+    {0},
+    {0},
+    (uint8_t)currentMode,
     0,
     0
   };
+  for (uint8_t i = 0; i < DEVICE_MODE_MAX; ++i) {
+    settings.speedIndexByMode[i] = speedIndexByMode[i];
+    settings.autoFireFlagsByMode[i] = autoFireFlagsByMode[i];
+  }
   settings.checksum = calcSettingsChecksum(settings);
 
   // RP2040はフラッシュ書き込み中に他コア実行が干渉すると停止することがあるため、
@@ -114,6 +217,21 @@ bool consumeSettingsSaveRequest() {
   return requested;
 }
 
+void requestModeSwitch() {
+  critical_section_enter_blocking(&modeSwitchCs);
+  modeSwitchRequested = true;
+  critical_section_exit(&modeSwitchCs);
+}
+
+bool consumeModeSwitchRequest() {
+  bool requested;
+  critical_section_enter_blocking(&modeSwitchCs);
+  requested = modeSwitchRequested;
+  modeSwitchRequested = false;
+  critical_section_exit(&modeSwitchCs);
+  return requested;
+}
+
 void loadSettingsFromNand() {
   DeviceSettings settings;
   EEPROM.get(0, settings);
@@ -121,17 +239,27 @@ void loadSettingsFromNand() {
   if (settings.magic != SETTINGS_MAGIC ||
       settings.version != SETTINGS_VERSION ||
       settings.checksum != calcSettingsChecksum(settings)) {
+    speedIndexByMode[DEVICE_MODE_MOUSE] = 0;
+    speedIndexByMode[DEVICE_MODE_GAMEPAD] = 0;
+    autoFireFlagsByMode[DEVICE_MODE_MOUSE] = 0;
+    autoFireFlagsByMode[DEVICE_MODE_GAMEPAD] = 0;
+    applyModeCacheToRuntimeSettings(currentMode);
     return;
   }
 
-  if (settings.speedIndex < sizeof(mouseStepTable)) {
-    mouseStepIdx = settings.speedIndex;
-    mouseStep = mouseStepTable[mouseStepIdx];
+  for (uint8_t i = 0; i < DEVICE_MODE_MAX; ++i) {
+    speedIndexByMode[i] = settings.speedIndexByMode[i];
+    autoFireFlagsByMode[i] = settings.autoFireFlagsByMode[i];
   }
 
-  btn1AutoFire = (settings.autoFireFlags & 0x01) != 0;
-  btn2AutoFire = (settings.autoFireFlags & 0x02) != 0;
-  btn3AutoFire = (settings.autoFireFlags & 0x04) != 0;
+  if (settings.currentMode < DEVICE_MODE_MAX) {
+    currentMode = (DeviceMode)settings.currentMode;
+  } else if (settings.mode < DEVICE_MODE_MAX) {
+    // 互換性: 旧フィールドが有効ならそれを使う。
+    currentMode = (DeviceMode)settings.mode;
+  }
+
+  applyModeCacheToRuntimeSettings(currentMode);
 }
 
 int8_t toMouseDelta(int16_t value) {
@@ -142,6 +270,30 @@ int8_t toMouseDelta(int16_t value) {
     return (int8_t)-127;
   }
   return (int8_t)value;
+}
+
+uint32_t mapMouseButtonsToGamepadButtons(uint8_t mouseButtons) {
+  uint16_t gamepadButtons = 0;
+  static uint8_t PpShift = OUT_PAD_SQUARE;
+  static bool LastPpShiftTrig = false;
+
+  if ((mouseButtons & 0x01) != 0) {
+    gamepadButtons |= OUT_PAD_R2;
+  }
+  if ((mouseButtons & 0x02) != 0) {
+    if (!LastPpShiftTrig) {
+      PpShift = (PpShift == OUT_PAD_SQUARE) ? OUT_PAD_CROSS : OUT_PAD_SQUARE;
+    }
+    LastPpShiftTrig = true;
+    gamepadButtons |= PpShift;
+  } else {
+    LastPpShiftTrig = false;
+  }
+  if ((mouseButtons & 0x04) != 0) {
+    gamepadButtons |= OUT_PAD_TRIANGLE;
+  }
+
+  return gamepadButtons;
 }
 
 void publishReportState(uint8_t buttons, bool axisIsAlt) {
@@ -246,7 +398,7 @@ void core1Task() {
       } else {
         lastTimeBtnSpd = now;
         if (!btnSpdSts) {
-          if (!speedComboConsumed) {
+          if (!speedComboConsumed && !modeSwitchComboActive) {
             mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
             mouseStep = mouseStepTable[mouseStepIdx];
             requestSettingsSave();
@@ -263,13 +415,23 @@ void core1Task() {
         btnAxisSts = lastBtnAxisSts;
       } else {
         lastTimeBtnAxis = now;
-        if (btnAxisSts) {
+        if (btnAxisSts && !btnSpdSts) {
           axisAlt = !axisAlt;
         }
       }
     }
 
-    if (!speedComboActive && btnSpdSts && (btn1Sts || btn2Sts || btn3Sts)) {
+    if (btnSpdSts && btnAxisSts) {
+      if (!modeSwitchComboActive) {
+        modeSwitchComboActive = true;
+        speedComboConsumed = true;
+        requestModeSwitch();
+      }
+    } else if (!btnSpdSts && !btnAxisSts) {
+      modeSwitchComboActive = false;
+    }
+
+    if (!modeSwitchComboActive && !speedComboActive && btnSpdSts && (btn1Sts || btn2Sts || btn3Sts)) {
       speedComboActive = true;
       speedComboConsumed = true;
       if (btn1Sts) {
@@ -369,11 +531,26 @@ void setup() {
     mouseStep = mouseStepTable[mouseStepIdx];
   }
 
+  const UsbIdentityProfile& usbIdentity =
+      (currentMode == DEVICE_MODE_GAMEPAD)
+          ? usbIdentityProfiles[USB_ID_PROFILE_GAMEPAD]
+          : usbIdentityProfiles[USB_ID_PROFILE_MOUSE];
+
+  if (currentMode == DEVICE_MODE_GAMEPAD) {
+    usb_hid.setPollInterval(1);
+    usb_hid.setReportCallback(hidPadGetReportCallback, hidPadSetReportCallback);
+    usb_hid.setReportDescriptor(desc_hid_report_gamepad, sizeof(desc_hid_report_gamepad));
+  } else {
+    usb_hid.setReportDescriptor(desc_hid_report_mouse, sizeof(desc_hid_report_mouse));
+  }
+
   TinyUSB_Device_Init(0);
+  TinyUSBDevice.setProductDescriptor(usbIdentity.product);
   usb_hid.begin();
 
   critical_section_init(&reportStateCs);
   critical_section_init(&settingsSaveCs);
+  critical_section_init(&modeSwitchCs);
   publishReportState(0, false);
 
   initS1S2Pio();
@@ -388,6 +565,8 @@ void loop() {
   static int8_t lastSentStepValue = 0;
   static uint8_t lastSentButtons = 0;
   static bool lastSentAxisAlt = false;
+  static int16_t lastGamepadCnt = 0;
+  static int16_t gamepadAccumulatedCnt = 0;
   unsigned long now = micros();
 
   if (nextReportUs == 0) {
@@ -396,6 +575,19 @@ void loop() {
 
   if (consumeSettingsSaveRequest()) {
     saveSettingsToNand();
+  }
+
+  if (consumeModeSwitchRequest()) {
+    syncRuntimeSettingsToModeCache(currentMode);
+    currentMode = (currentMode == DEVICE_MODE_MOUSE) ? DEVICE_MODE_GAMEPAD : DEVICE_MODE_MOUSE;
+    applyModeCacheToRuntimeSettings(currentMode);
+    axisAlt = false;
+    publishReportState(0, false);
+    saveSettingsToNand();
+    watchdog_reboot(0, 0, 10);
+    while (true) {
+      tight_loop_contents();
+    }
   }
 
   if ((long)(now - nextReportUs) >= 0) {
@@ -411,8 +603,33 @@ void loop() {
   noInterrupts();
   pendingCnt = cnt;
   interrupts();
-  int16_t scaledCnt = pendingCnt * mouseStep;
-  int8_t stepValue = toMouseDelta(scaledCnt);
+
+  int8_t stepValue;
+  if (currentMode == DEVICE_MODE_GAMEPAD) {
+    int16_t deltaCnt = pendingCnt - lastGamepadCnt;
+    lastGamepadCnt = pendingCnt;
+    if (deltaCnt != 0) {
+      int16_t nextAccumulated = gamepadAccumulatedCnt + deltaCnt * mouseStep;
+      if (nextAccumulated > 127) {
+        nextAccumulated = 127;
+      } else if (nextAccumulated < -127) {
+        nextAccumulated = -127;
+      }
+      gamepadAccumulatedCnt = nextAccumulated;
+    }
+    if (gamepadAccumulatedCnt > 127) {
+      gamepadAccumulatedCnt = 127;
+    } else if (gamepadAccumulatedCnt < -127) {
+      gamepadAccumulatedCnt = -127;
+    } else if (gamepadAccumulatedCnt < mouseStep && gamepadAccumulatedCnt > -mouseStep) {
+      gamepadAccumulatedCnt = 0;
+    }
+
+    stepValue = (int8_t)gamepadAccumulatedCnt;
+  } else {
+    int16_t scaledCnt = pendingCnt * mouseStep;
+    stepValue = toMouseDelta(scaledCnt);
+  }
 
   uint8_t reportButtons;
   bool reportAxisAlt;
@@ -422,15 +639,28 @@ void loop() {
   critical_section_exit(&reportStateCs);
 
   mouse_report.buttons = reportButtons;
-  if (reportAxisAlt) {
-    mouse_report.x = 0;
-    mouse_report.y = stepValue;
+
+  if (currentMode == DEVICE_MODE_MOUSE) {
+    if (reportAxisAlt) {
+      mouse_report.x = 0;
+      mouse_report.y = stepValue;
+    } else {
+      mouse_report.x = stepValue;
+      mouse_report.y = 0;
+    }
   } else {
-    mouse_report.x = stepValue;
-    mouse_report.y = 0;
+    gamepad_report.x = reportAxisAlt ? 127 : stepValue + 127;
+    gamepad_report.y = reportAxisAlt ? stepValue + 127 : 127;
+    gamepad_report.z = 127;
+    gamepad_report.rz = 127;
+    gamepad_report.hat = GAMEPAD_HAT_CENTER;
+    gamepad_report.buttons = mapMouseButtonsToGamepadButtons(reportButtons);
+    memset(gamepad_report.vendorInput, 0, sizeof(gamepad_report.vendorInput));
+    memset(gamepad_report.analog, 0, sizeof(gamepad_report.analog));
   }
 
   bool reportChanged = !hasLastSentReport ||
+                       (currentMode == DEVICE_MODE_GAMEPAD) ||
                        (stepValue != lastSentStepValue) ||
                        (reportButtons != lastSentButtons) ||
                        (reportAxisAlt != lastSentAxisAlt);
@@ -449,11 +679,17 @@ void loop() {
   }
 
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
-    usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
+    if (currentMode == DEVICE_MODE_MOUSE) {
+      usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
+    } else {
+      usb_hid.sendReport(0, &gamepad_report, sizeof(gamepad_report));
+    }
+
     int16_t consumedTicks = (mouseStep != 0) ? ((int16_t)stepValue / mouseStep) : stepValue;
     noInterrupts();
     cnt -= consumedTicks;
     interrupts();
+
     hasLastSentReport = true;
     lastSentStepValue = stepValue;
     lastSentButtons = reportButtons;
