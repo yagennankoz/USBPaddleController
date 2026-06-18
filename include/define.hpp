@@ -23,10 +23,13 @@
 #define OUT_PAD_CIRCLE (1u << 2)
 #define OUT_PAD_TRIANGLE (1u << 3)
 #define OUT_PAD_R2 (1u << 7)
-#define OUT_PAD_OPTIONS (1u << 9) // 0x1000
+#define OUT_PAD_PS (1u << 12)
 
 typedef struct
 {
+  uint16_t vid;
+  uint16_t pid;
+  const char *manufacturer;
   const char *product;
 } UsbIdentityProfile;
 
@@ -40,8 +43,8 @@ enum
 
 // USB identity table indexed by USB_ID_PROFILE_*.
 const UsbIdentityProfile usbIdentityProfiles[USB_ID_PROFILE_MAX] = {
-    {"PADDLE CONTROLLER"},
-    {"POLE POSITION PADDLE"},
+    {0x2E8A, 0x0005, "USB PADDLE CONTROLLER", "PADDLE"},
+    {0x2E8A, 0x0004, "USB PADDLE CONTROLLER", "POLE POSITION PADDLE"},
 };
 
 #define MY_TUD_HID_REPORT_DESC_GAMEPAD(...)                           \

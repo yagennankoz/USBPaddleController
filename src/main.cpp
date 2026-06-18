@@ -77,10 +77,12 @@ uint8_t s1s2LastSts = 0;
 critical_section_t reportStateCs;
 critical_section_t settingsSaveCs;
 critical_section_t modeSwitchCs;
+critical_section_t modeStateCs;
 volatile uint8_t sharedButtons = 0;
 volatile bool sharedAxisAlt = false;
 volatile bool settingsSaveRequested = false;
 volatile bool modeSwitchRequested = false;
+volatile uint8_t sharedMode = DEVICE_MODE_MOUSE;
 
 const unsigned long REPORT_INTERVAL_US = 1000u;
 const int EEPROM_SIZE_BYTES = 64;
@@ -171,7 +173,7 @@ void applyModeCacheToRuntimeSettings(DeviceMode mode) {
   }
 
   mouseStepIdx = speedIndex;
-  mouseStep = mouseStepTable[mouseStepIdx] * ((currentMode == DEVICE_MODE_GAMEPAD) ? 4 : 1);
+  mouseStep = (currentMode == DEVICE_MODE_MOUSE) ? mouseStepTable[mouseStepIdx] : mouseStepTable[0] * 4;
   applyRuntimeAutoFireFlags(autoFireFlagsByMode[mode]);
 }
 
@@ -292,6 +294,9 @@ uint32_t mapMouseButtonsToGamepadButtons(uint8_t mouseButtons) {
   if ((mouseButtons & 0x04) != 0) {
     gamepadButtons |= OUT_PAD_TRIANGLE;
   }
+  if ((mouseButtons & 0x08) != 0) {
+    gamepadButtons |= OUT_PAD_PS;
+  }
 
   return gamepadButtons;
 }
@@ -301,6 +306,24 @@ void publishReportState(uint8_t buttons, bool axisIsAlt) {
   sharedButtons = buttons;
   sharedAxisAlt = axisIsAlt;
   critical_section_exit(&reportStateCs);
+}
+
+void publishModeState(DeviceMode mode) {
+  critical_section_enter_blocking(&modeStateCs);
+  sharedMode = (uint8_t)mode;
+  critical_section_exit(&modeStateCs);
+}
+
+DeviceMode consumeModeState() {
+  uint8_t mode;
+  critical_section_enter_blocking(&modeStateCs);
+  mode = sharedMode;
+  critical_section_exit(&modeStateCs);
+
+  if (mode >= DEVICE_MODE_MAX) {
+    return DEVICE_MODE_MOUSE;
+  }
+  return (DeviceMode)mode;
 }
 
 void initS1S2Pio() {
@@ -345,8 +368,10 @@ void core1Task() {
   // multicore_lockout_start_blocking() を使うため、
   // ロックアウト対象コア側の初期化を行う。
   multicore_lockout_victim_init();
+  bool modeSwitchArmed = false;
 
   while (true) {
+    DeviceMode deviceMode = consumeModeState();
     unsigned long now = micros();
     if (lastTimeBtn1 > now) {
       lastTimeBtn1 = 0;
@@ -399,8 +424,12 @@ void core1Task() {
         lastTimeBtnSpd = now;
         if (!btnSpdSts) {
           if (!speedComboConsumed && !modeSwitchComboActive) {
-            mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
-            mouseStep = mouseStepTable[mouseStepIdx];
+            if (deviceMode == DEVICE_MODE_MOUSE) {
+              mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
+            } else {
+              mouseStepIdx = 0;
+            }
+            mouseStep = mouseStepTable[mouseStepIdx] * ((deviceMode == DEVICE_MODE_MOUSE) ? 1 : 4);
             requestSettingsSave();
           }
           speedComboActive = false;
@@ -421,17 +450,25 @@ void core1Task() {
       }
     }
 
-    if (btnSpdSts && btnAxisSts) {
+    if (!btnSpdSts || !btnAxisSts) {
+      modeSwitchComboActive = false;
+      modeSwitchArmed = true;
+    }
+
+    if (modeSwitchArmed && btnSpdSts && btnAxisSts) {
       if (!modeSwitchComboActive) {
         modeSwitchComboActive = true;
+        modeSwitchArmed = false;
         speedComboConsumed = true;
         requestModeSwitch();
       }
-    } else if (!btnSpdSts && !btnAxisSts) {
-      modeSwitchComboActive = false;
     }
 
-    if (!modeSwitchComboActive && !speedComboActive && btnSpdSts && (btn1Sts || btn2Sts || btn3Sts)) {
+    if (deviceMode == DEVICE_MODE_MOUSE &&
+        !modeSwitchComboActive &&
+        !speedComboActive &&
+        btnSpdSts &&
+        (btn1Sts || btn2Sts || btn3Sts)) {
       speedComboActive = true;
       speedComboConsumed = true;
       if (btn1Sts) {
@@ -493,10 +530,10 @@ void core1Task() {
       autoFireStateBtn3 = false;
     }
 
-    uint8_t finalBtn1 = btn1AutoFire ? btn1AutoFireOutput : outBtn1;
-    uint8_t finalBtn2 = btn2AutoFire ? btn2AutoFireOutput : outBtn2;
-    uint8_t finalBtn3 = btn3AutoFire ? btn3AutoFireOutput : outBtn3;
-    uint8_t finalButtons = finalBtn1 | finalBtn2 << 1 | finalBtn3 << 2;
+    uint8_t finalBtn1 = (deviceMode == DEVICE_MODE_MOUSE && btn1AutoFire) ? btn1AutoFireOutput : outBtn1;
+    uint8_t finalBtn2 = (deviceMode == DEVICE_MODE_MOUSE && btn2AutoFire) ? btn2AutoFireOutput : outBtn2;
+    uint8_t finalBtn3 = (deviceMode == DEVICE_MODE_MOUSE && btn3AutoFire) ? btn3AutoFireOutput : outBtn3;
+    uint8_t finalButtons = finalBtn1 | finalBtn2 << 1 | finalBtn3 << 2 | btnSpdSts << 3 | btnAxisSts << 4;
 
     publishReportState(finalButtons, axisAlt);
 
@@ -545,13 +582,17 @@ void setup() {
   }
 
   TinyUSB_Device_Init(0);
+  TinyUSBDevice.setID(usbIdentity.vid, usbIdentity.pid);
+  TinyUSBDevice.setManufacturerDescriptor(usbIdentity.manufacturer);
   TinyUSBDevice.setProductDescriptor(usbIdentity.product);
   usb_hid.begin();
 
   critical_section_init(&reportStateCs);
   critical_section_init(&settingsSaveCs);
   critical_section_init(&modeSwitchCs);
+  critical_section_init(&modeStateCs);
   publishReportState(0, false);
+  publishModeState(currentMode);
 
   initS1S2Pio();
 
@@ -581,9 +622,13 @@ void loop() {
     syncRuntimeSettingsToModeCache(currentMode);
     currentMode = (currentMode == DEVICE_MODE_MOUSE) ? DEVICE_MODE_GAMEPAD : DEVICE_MODE_MOUSE;
     applyModeCacheToRuntimeSettings(currentMode);
+    publishModeState(currentMode);
     axisAlt = false;
     publishReportState(0, false);
     saveSettingsToNand();
+    // ホスト側で古いHID構成が残るのを避けるため、切替時はいったん明示的に切断する。
+    TinyUSBDevice.detach();
+    delay(250);
     watchdog_reboot(0, 0, 10);
     while (true) {
       tight_loop_contents();
@@ -638,7 +683,7 @@ void loop() {
   reportAxisAlt = sharedAxisAlt;
   critical_section_exit(&reportStateCs);
 
-  mouse_report.buttons = reportButtons;
+  mouse_report.buttons = reportButtons & 0x07;
 
   if (currentMode == DEVICE_MODE_MOUSE) {
     if (reportAxisAlt) {
