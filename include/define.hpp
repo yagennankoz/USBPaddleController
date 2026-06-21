@@ -22,6 +22,7 @@
 #define OUT_PAD_CROSS (1u << 1)
 #define OUT_PAD_CIRCLE (1u << 2)
 #define OUT_PAD_TRIANGLE (1u << 3)
+#define OUT_PAD_L2 (1u << 6)
 #define OUT_PAD_R2 (1u << 7)
 #define OUT_PAD_PS (1u << 12)
 
@@ -170,6 +171,13 @@ typedef struct __attribute__((packed))
 const int8_t mouseStepTable[] = {8, 6, 4, 2};
 
 const unsigned long AUTO_FIRE_INTERVAL = 50000u; // 連射インターバル (マイクロ秒)
+const unsigned long GAMEPAD_R2_HOLD_TRIGGER_US = 3000000u; // R2長押し判定時間 (マイクロ秒)
+const unsigned long GAMEPAD_L2_PULSE_INTERVAL_US = 50000u; // L2押下間隔 (マイクロ秒)
+const unsigned long GAMEPAD_L2_PULSE_WIDTH_US = 15000u; // L2の1回押下幅 (マイクロ秒)
+const unsigned long GAMEPAD_L2_BURST_DURATION_US = 900000u; // L2自動押下継続時間 (マイクロ秒)
+
+const float GAMEPAD_MAGNIFIER_MAX = 0.8f;
+const uint16_t GAMEPAD_MAGNIFIER_THRESHOLD = 16;
 
 const uint8_t SETTINGS_MAGIC = 0xA5;
 const uint8_t SETTINGS_VERSION = 2;

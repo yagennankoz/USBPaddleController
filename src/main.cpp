@@ -278,6 +278,28 @@ uint32_t mapMouseButtonsToGamepadButtons(uint8_t mouseButtons) {
   uint16_t gamepadButtons = 0;
   static uint8_t PpShift = OUT_PAD_SQUARE;
   static bool LastPpShiftTrig = false;
+  static bool wasR2Pressed = false;
+  static unsigned long r2PressStartUs = 0;
+  static bool l2BurstActive = false;
+  static unsigned long l2BurstStartUs = 0;
+  static unsigned long lastL2PulseUs = 0;
+  static bool l2PulseActive = false;
+  static unsigned long l2PulseStartUs = 0;
+  unsigned long now = micros();
+
+  // micros() がオーバーフローした場合に備えて開始時刻を補正する。
+  if (r2PressStartUs > now) {
+    r2PressStartUs = now;
+  }
+  if (l2BurstStartUs > now) {
+    l2BurstStartUs = now;
+  }
+  if (lastL2PulseUs > now) {
+    lastL2PulseUs = now;
+  }
+  if (l2PulseStartUs > now) {
+    l2PulseStartUs = now;
+  }
 
   if ((mouseButtons & 0x01) != 0) {
     gamepadButtons |= OUT_PAD_R2;
@@ -296,6 +318,47 @@ uint32_t mapMouseButtonsToGamepadButtons(uint8_t mouseButtons) {
   }
   if ((mouseButtons & 0x08) != 0) {
     gamepadButtons |= OUT_PAD_PS;
+  }
+
+  bool r2Pressed = (gamepadButtons & OUT_PAD_R2) != 0;
+  if (r2Pressed) {
+    if (!wasR2Pressed) {
+      r2PressStartUs = now;
+    }
+    wasR2Pressed = true;
+    l2BurstActive = false;
+    l2PulseActive = false;
+  } else {
+    if (wasR2Pressed) {
+      unsigned long heldUs = now - r2PressStartUs;
+      if (heldUs >= GAMEPAD_R2_HOLD_TRIGGER_US) {
+        l2BurstActive = true;
+        l2BurstStartUs = now;
+        lastL2PulseUs = now - GAMEPAD_L2_PULSE_INTERVAL_US;
+        l2PulseActive = false;
+      }
+    }
+    wasR2Pressed = false;
+  }
+
+  if (l2BurstActive) {
+    unsigned long elapsedUs = now - l2BurstStartUs;
+    if (elapsedUs < GAMEPAD_L2_BURST_DURATION_US) {
+      if (!l2PulseActive && (now - lastL2PulseUs) >= GAMEPAD_L2_PULSE_INTERVAL_US) {
+        l2PulseActive = true;
+        l2PulseStartUs = now;
+        lastL2PulseUs = now;
+      }
+
+      if (l2PulseActive && (now - l2PulseStartUs) < GAMEPAD_L2_PULSE_WIDTH_US) {
+        gamepadButtons |= OUT_PAD_L2;
+      } else {
+        l2PulseActive = false;
+      }
+    } else {
+      l2BurstActive = false;
+      l2PulseActive = false;
+    }
   }
 
   return gamepadButtons;
@@ -426,10 +489,8 @@ void core1Task() {
           if (!speedComboConsumed && !modeSwitchComboActive) {
             if (deviceMode == DEVICE_MODE_MOUSE) {
               mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
-            } else {
-              mouseStepIdx = 0;
+              mouseStep = mouseStepTable[mouseStepIdx];
             }
-            mouseStep = mouseStepTable[mouseStepIdx] * ((deviceMode == DEVICE_MODE_MOUSE) ? 1 : 4);
             requestSettingsSave();
           }
           speedComboActive = false;
@@ -607,7 +668,7 @@ void loop() {
   static uint8_t lastSentButtons = 0;
   static bool lastSentAxisAlt = false;
   static int16_t lastGamepadCnt = 0;
-  static int16_t gamepadAccumulatedCnt = 0;
+  static float gamepadAccumulatedCnt = 0.0f;
   unsigned long now = micros();
 
   if (nextReportUs == 0) {
@@ -651,26 +712,16 @@ void loop() {
 
   int8_t stepValue;
   if (currentMode == DEVICE_MODE_GAMEPAD) {
-    int16_t deltaCnt = pendingCnt - lastGamepadCnt;
-    lastGamepadCnt = pendingCnt;
-    if (deltaCnt != 0) {
-      int16_t nextAccumulated = gamepadAccumulatedCnt + deltaCnt * mouseStep;
-      if (nextAccumulated > 127) {
-        nextAccumulated = 127;
-      } else if (nextAccumulated < -127) {
-        nextAccumulated = -127;
-      }
-      gamepadAccumulatedCnt = nextAccumulated;
+    if (pendingCnt != 0) {
+      int16_t cntAbs = abs(pendingCnt);
+      int16_t t = GAMEPAD_MAGNIFIER_THRESHOLD - cntAbs > GAMEPAD_MAGNIFIER_THRESHOLD ? GAMEPAD_MAGNIFIER_THRESHOLD : cntAbs;
+      float magnification = 1.0f + (float)(GAMEPAD_MAGNIFIER_MAX * t * t) / (float)(GAMEPAD_MAGNIFIER_THRESHOLD * GAMEPAD_MAGNIFIER_THRESHOLD);
+      gamepadAccumulatedCnt = gamepadAccumulatedCnt + ((float)pendingCnt * magnification);
+    } else {
+      gamepadAccumulatedCnt = gamepadAccumulatedCnt * 0.3f;
     }
-    if (gamepadAccumulatedCnt > 127) {
-      gamepadAccumulatedCnt = 127;
-    } else if (gamepadAccumulatedCnt < -127) {
-      gamepadAccumulatedCnt = -127;
-    } else if (gamepadAccumulatedCnt < mouseStep && gamepadAccumulatedCnt > -mouseStep) {
-      gamepadAccumulatedCnt = 0;
-    }
-
-    stepValue = (int8_t)gamepadAccumulatedCnt;
+    stepValue = toMouseDelta((int16_t)gamepadAccumulatedCnt);
+    gamepadAccumulatedCnt = (float)(abs(stepValue) > 110 ? stepValue * 0.8f : stepValue);
   } else {
     int16_t scaledCnt = pendingCnt * mouseStep;
     stepValue = toMouseDelta(scaledCnt);
@@ -718,11 +769,6 @@ void loop() {
     return;
   }
 
-  if (!reportChanged) {
-    reportPending = false;
-    return;
-  }
-
   if (TinyUSBDevice.mounted() && usb_hid.ready()) {
     if (currentMode == DEVICE_MODE_MOUSE) {
       usb_hid.sendReport(0, &mouse_report, sizeof(mouse_report));
@@ -730,9 +776,8 @@ void loop() {
       usb_hid.sendReport(0, &gamepad_report, sizeof(gamepad_report));
     }
 
-    int16_t consumedTicks = (mouseStep != 0) ? ((int16_t)stepValue / mouseStep) : stepValue;
     noInterrupts();
-    cnt -= consumedTicks;
+    cnt -= pendingCnt;
     interrupts();
 
     hasLastSentReport = true;
