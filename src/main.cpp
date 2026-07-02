@@ -7,6 +7,9 @@
 #include <SPI.h>
 #include <EEPROM.h>
 #include <Adafruit_TinyUSB.h>
+#if defined(BOARD_RP2040_ZERO)
+#include <Adafruit_NeoPixel.h>
+#endif
 #include <define.hpp>
 #include "s1s2_encoder.pio.h"
 
@@ -69,7 +72,7 @@ int16_t cnt;
 int16_t mouseStepIdx = 0;
 int16_t mouseStep = mouseStepTable[mouseStepIdx];
 
-PIO s1s2Pio = pio0;
+PIO s1s2Pio = pio1;
 uint s1s2Sm = 0;
 uint s1s2ProgramOffset = 0;
 uint8_t s1s2LastSts = 0;
@@ -78,15 +81,31 @@ critical_section_t reportStateCs;
 critical_section_t settingsSaveCs;
 critical_section_t modeSwitchCs;
 critical_section_t modeStateCs;
+critical_section_t ledBlinkCs;
+critical_section_t speedBlinkCs;
 volatile uint8_t sharedButtons = 0;
 volatile bool sharedAxisAlt = false;
 volatile bool settingsSaveRequested = false;
 volatile bool modeSwitchRequested = false;
 volatile uint8_t sharedMode = DEVICE_MODE_MOUSE;
+volatile bool activityLedBlinkRequested = false;
+volatile uint8_t speedLedBlinkRequestedCount = 0;
 
-const unsigned long REPORT_INTERVAL_US = 1000u;
-const int EEPROM_SIZE_BYTES = 64;
-const uint8_t GAMEPAD_HAT_CENTER = 8;
+bool startupLedActive = false;
+uint8_t startupLedMode = DEVICE_MODE_MOUSE;
+unsigned long startupLedStartMs = 0;
+bool startupLedLastOn = false;
+bool activityLedBlinkActive = false;
+unsigned long activityLedBlinkUntilMs = 0;
+unsigned long activityLedNextAllowedMs = 0;
+bool speedLedBlinkActive = false;
+bool speedLedBlinkOn = false;
+uint8_t speedLedBlinkRemaining = 0;
+unsigned long speedLedBlinkNextToggleMs = 0;
+
+#if defined(BOARD_RP2040_ZERO)
+Adafruit_NeoPixel statusLed(1, PIN_LED, NEO_GRB + NEO_KHZ800);
+#endif
 
 struct DeviceSettings {
   uint8_t magic;
@@ -225,6 +244,36 @@ void requestModeSwitch() {
   critical_section_exit(&modeSwitchCs);
 }
 
+void requestActivityLedBlink() {
+  critical_section_enter_blocking(&ledBlinkCs);
+  activityLedBlinkRequested = true;
+  critical_section_exit(&ledBlinkCs);
+}
+
+void requestSpeedLedBlink(uint8_t count) {
+  critical_section_enter_blocking(&speedBlinkCs);
+  speedLedBlinkRequestedCount = count;
+  critical_section_exit(&speedBlinkCs);
+}
+
+bool consumeActivityLedBlinkRequest() {
+  bool requested;
+  critical_section_enter_blocking(&ledBlinkCs);
+  requested = activityLedBlinkRequested;
+  activityLedBlinkRequested = false;
+  critical_section_exit(&ledBlinkCs);
+  return requested;
+}
+
+uint8_t consumeSpeedLedBlinkRequest() {
+  uint8_t count;
+  critical_section_enter_blocking(&speedBlinkCs);
+  count = speedLedBlinkRequestedCount;
+  speedLedBlinkRequestedCount = 0;
+  critical_section_exit(&speedBlinkCs);
+  return count;
+}
+
 bool consumeModeSwitchRequest() {
   bool requested;
   critical_section_enter_blocking(&modeSwitchCs);
@@ -232,6 +281,163 @@ bool consumeModeSwitchRequest() {
   modeSwitchRequested = false;
   critical_section_exit(&modeSwitchCs);
   return requested;
+}
+
+void startupLedSet(bool on, DeviceMode mode) {
+#if defined(BOARD_RP2040_ZERO)
+  statusLed.setBrightness(STARTUP_LED_BRIGHTNESS);
+  if (on) {
+    if (mode == DEVICE_MODE_GAMEPAD) {
+      statusLed.setPixelColor(0, statusLed.Color(0, 255, 0));
+    } else {
+      statusLed.setPixelColor(0, statusLed.Color(255, 128, 0));
+    }
+  } else {
+    statusLed.setPixelColor(0, statusLed.Color(0, 0, 0));
+  }
+  statusLed.show();
+#else
+  digitalWrite(PIN_LED, on ? HIGH : LOW);
+#endif
+}
+
+void activityLedSet(bool on) {
+#if defined(BOARD_RP2040_ZERO)
+  statusLed.setBrightness(ACTIVITY_LED_BRIGHTNESS);
+  if (on) {
+    statusLed.setPixelColor(0, statusLed.Color(255, 255, 0));
+  } else {
+    statusLed.setPixelColor(0, statusLed.Color(0, 0, 0));
+  }
+  statusLed.show();
+#else
+  digitalWrite(PIN_LED, on ? HIGH : LOW);
+#endif
+}
+
+void speedLedSet(bool on) {
+#if defined(BOARD_RP2040_ZERO)
+  statusLed.setBrightness(ACTIVITY_LED_BRIGHTNESS);
+  if (on) {
+    statusLed.setPixelColor(0, statusLed.Color(128, 200, 255));
+  } else {
+    statusLed.setPixelColor(0, statusLed.Color(0, 0, 0));
+  }
+  statusLed.show();
+#else
+  digitalWrite(PIN_LED, on ? HIGH : LOW);
+#endif
+}
+
+void restoreLedBaseState() {
+  if (activityLedBlinkActive) {
+    activityLedSet(true);
+    return;
+  }
+
+  bool startupOn = startupLedActive && startupLedLastOn;
+  if (startupOn) {
+    startupLedSet(true, (DeviceMode)startupLedMode);
+  } else {
+    startupLedSet(false, (DeviceMode)startupLedMode);
+  }
+}
+
+void startStartupLedPattern(DeviceMode mode) {
+  startupLedMode = (uint8_t)mode;
+  startupLedStartMs = millis();
+  startupLedActive = true;
+  startupLedLastOn = true;
+  startupLedSet(true, mode);
+}
+
+void updateStartupLedPattern(unsigned long nowMs) {
+  if (!startupLedActive) {
+    return;
+  }
+
+  unsigned long elapsedMs = nowMs - startupLedStartMs;
+  if (elapsedMs >= STARTUP_LED_TOTAL_MS) {
+    if (startupLedLastOn) {
+      if (!activityLedBlinkActive) {
+        startupLedSet(false, (DeviceMode)startupLedMode);
+      }
+      startupLedLastOn = false;
+    }
+    startupLedActive = false;
+    return;
+  }
+
+  bool nextOn = true;
+  if (startupLedMode == DEVICE_MODE_GAMEPAD) {
+    nextOn = ((elapsedMs / STARTUP_LED_BLINK_HALF_MS) % 2u) == 0u;
+  }
+
+  if (nextOn != startupLedLastOn) {
+    if (!activityLedBlinkActive) {
+      startupLedSet(nextOn, (DeviceMode)startupLedMode);
+    }
+    startupLedLastOn = nextOn;
+  }
+}
+
+void updateActivityLedBlink(unsigned long nowMs) {
+  if (consumeActivityLedBlinkRequest()) {
+    if ((long)(nowMs - activityLedNextAllowedMs) >= 0) {
+      activityLedBlinkActive = true;
+      activityLedBlinkUntilMs = nowMs + ACTIVITY_LED_ON_MS;
+      activityLedNextAllowedMs = nowMs + ACTIVITY_LED_ON_MS + ACTIVITY_LED_OFF_MS;
+      activityLedSet(true);
+    }
+  }
+
+  if (activityLedBlinkActive && (long)(nowMs - activityLedBlinkUntilMs) >= 0) {
+    activityLedBlinkActive = false;
+
+    if (!speedLedBlinkActive) {
+      restoreLedBaseState();
+    }
+  }
+}
+
+void updateSpeedLedBlink(unsigned long nowMs) {
+  uint8_t requestedCount = consumeSpeedLedBlinkRequest();
+  if (requestedCount > 0) {
+    speedLedBlinkActive = true;
+    speedLedBlinkRemaining = requestedCount;
+    speedLedBlinkOn = true;
+    speedLedBlinkNextToggleMs = nowMs + SPEED_LED_ON_MS;
+    speedLedSet(true);
+  }
+
+  if (!speedLedBlinkActive) {
+    return;
+  }
+
+  if ((long)(nowMs - speedLedBlinkNextToggleMs) < 0) {
+    return;
+  }
+
+  if (speedLedBlinkOn) {
+    speedLedSet(false);
+    speedLedBlinkOn = false;
+    if (speedLedBlinkRemaining > 0) {
+      --speedLedBlinkRemaining;
+    }
+
+    if (speedLedBlinkRemaining == 0) {
+      speedLedBlinkActive = false;
+      restoreLedBaseState();
+      return;
+    }
+
+    speedLedBlinkNextToggleMs = nowMs + SPEED_LED_OFF_MS;
+    return;
+  }
+
+  speedLedSet(true);
+  speedLedBlinkOn = true;
+  speedLedBlinkNextToggleMs = nowMs + SPEED_LED_ON_MS;
 }
 
 void loadSettingsFromNand() {
@@ -348,6 +554,7 @@ uint32_t mapMouseButtonsToGamepadButtons(uint8_t mouseButtons) {
         l2PulseActive = true;
         l2PulseStartUs = now;
         lastL2PulseUs = now;
+        requestActivityLedBlink();
       }
 
       if (l2PulseActive && (now - l2PulseStartUs) < GAMEPAD_L2_PULSE_WIDTH_US) {
@@ -415,7 +622,12 @@ void consumeS1S2Pio() {
     0, 1, -1, 0,
   };
 
-  while (!pio_sm_is_rx_fifo_empty(s1s2Pio, s1s2Sm)) {
+  // RX FIFOが埋まり続けるとloop全体が飢餓するため、
+  // 1回の呼び出しで処理するサンプル数に上限を設ける。
+  const uint8_t maxSamplesPerLoop = 64;
+  uint8_t samples = 0;
+
+  while (!pio_sm_is_rx_fifo_empty(s1s2Pio, s1s2Sm) && samples < maxSamplesPerLoop) {
     uint8_t newSts = (uint8_t)(pio_sm_get(s1s2Pio, s1s2Sm) & 0x03);
     uint8_t transition = (uint8_t)((s1s2LastSts << 2) | newSts);
     int8_t delta = transitionTable[transition];
@@ -424,6 +636,7 @@ void consumeS1S2Pio() {
       cnt += delta;
     }
     s1s2LastSts = newSts;
+    ++samples;
   }
 }
 
@@ -490,6 +703,7 @@ void core1Task() {
             if (deviceMode == DEVICE_MODE_MOUSE) {
               mouseStepIdx = (mouseStepIdx + 1) % sizeof(mouseStepTable);
               mouseStep = mouseStepTable[mouseStepIdx];
+              requestSpeedLedBlink((uint8_t)(mouseStepIdx + 1));
             }
             requestSettingsSave();
           }
@@ -558,10 +772,13 @@ void core1Task() {
     uint8_t btn2AutoFireOutput = 0;
     uint8_t btn3AutoFireOutput = 0;
 
-    if (btn1AutoFire && outBtn1) {
+    if (deviceMode == DEVICE_MODE_MOUSE && btn1AutoFire && outBtn1) {
       if (now - lastAutoFireBtn1 >= AUTO_FIRE_INTERVAL) {
         autoFireStateBtn1 = !autoFireStateBtn1;
         lastAutoFireBtn1 = now;
+        if (autoFireStateBtn1) {
+          requestActivityLedBlink();
+        }
       }
       btn1AutoFireOutput = autoFireStateBtn1;
     } else {
@@ -569,10 +786,13 @@ void core1Task() {
       autoFireStateBtn1 = false;
     }
 
-    if (btn2AutoFire && outBtn2) {
+    if (deviceMode == DEVICE_MODE_MOUSE && btn2AutoFire && outBtn2) {
       if (now - lastAutoFireBtn2 >= AUTO_FIRE_INTERVAL) {
         autoFireStateBtn2 = !autoFireStateBtn2;
         lastAutoFireBtn2 = now;
+        if (autoFireStateBtn2) {
+          requestActivityLedBlink();
+        }
       }
       btn2AutoFireOutput = autoFireStateBtn2;
     } else {
@@ -580,10 +800,13 @@ void core1Task() {
       autoFireStateBtn2 = false;
     }
 
-    if (btn3AutoFire && outBtn3) {
+    if (deviceMode == DEVICE_MODE_MOUSE && btn3AutoFire && outBtn3) {
       if (now - lastAutoFireBtn3 >= AUTO_FIRE_INTERVAL) {
         autoFireStateBtn3 = !autoFireStateBtn3;
         lastAutoFireBtn3 = now;
+        if (autoFireStateBtn3) {
+          requestActivityLedBlink();
+        }
       }
       btn3AutoFireOutput = autoFireStateBtn3;
     } else {
@@ -622,6 +845,16 @@ void setup() {
   pinMode(PIN_BTN3, INPUT_PULLUP);
   pinMode(PIN_BTNSPD, INPUT_PULLUP);
   pinMode(PIN_BTNAXIS, INPUT_PULLUP);
+  pinMode(PIN_LED, OUTPUT);
+
+#if defined(BOARD_RP2040_ZERO)
+  statusLed.begin();
+  statusLed.setBrightness(STARTUP_LED_BRIGHTNESS);
+  statusLed.setPixelColor(0, statusLed.Color(0, 0, 0));
+  statusLed.show();
+#else
+  digitalWrite(PIN_LED, LOW);
+#endif
 
   // 起動時にボタンが同時に押されている場合は、低速モードにする
   if (!gpio_get(PIN_BTN1) && !gpio_get(PIN_BTN2)) {
@@ -648,10 +881,15 @@ void setup() {
   TinyUSBDevice.setProductDescriptor(usbIdentity.product);
   usb_hid.begin();
 
+  // Enumerate USB first, then start startup LED pattern without blocking.
+  startStartupLedPattern(currentMode);
+
   critical_section_init(&reportStateCs);
   critical_section_init(&settingsSaveCs);
   critical_section_init(&modeSwitchCs);
   critical_section_init(&modeStateCs);
+  critical_section_init(&ledBlinkCs);
+  critical_section_init(&speedBlinkCs);
   publishReportState(0, false);
   publishModeState(currentMode);
 
@@ -670,6 +908,11 @@ void loop() {
   static int16_t lastGamepadCnt = 0;
   static float gamepadAccumulatedCnt = 0.0f;
   unsigned long now = micros();
+  unsigned long nowMs = millis();
+
+  updateStartupLedPattern(nowMs);
+  updateActivityLedBlink(nowMs);
+  updateSpeedLedBlink(nowMs);
 
   if (nextReportUs == 0) {
     nextReportUs = now + REPORT_INTERVAL_US;

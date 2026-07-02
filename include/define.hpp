@@ -2,14 +2,36 @@
 
 #include <Arduino.h>
 
-#define PIN_S1      D27
-#define PIN_S2      D26
+#ifdef BOARD_PICO
+  #define PIN_S1      D27
+  #define PIN_S2      D26
 
-#define PIN_BTN1    D19
-#define PIN_BTN2    D18
-#define PIN_BTN3    D15
-#define PIN_BTNSPD  D17
-#define PIN_BTNAXIS D16
+  #define PIN_BTN1    D19
+  #define PIN_BTN2    D18
+  #define PIN_BTN3    D15
+  #define PIN_BTNSPD  D17
+  #define PIN_BTNAXIS D16
+
+  #ifndef PIN_LED
+    #define PIN_LED   D25
+  #endif
+#endif
+
+#ifdef BOARD_RP2040_ZERO
+  #define PIN_S1      D27
+  #define PIN_S2      D26
+
+  #define PIN_BTN1    D13
+  #define PIN_BTN2    D12
+  #define PIN_BTN3    D11
+  #define PIN_BTNSPD  D10
+  #define PIN_BTNAXIS D9
+
+  #ifdef PIN_LED
+    #undef PIN_LED
+  #endif
+  #define PIN_LED     D16
+#endif
 
 #define DIR_N       (0u)
 #define DIR_RIGHT   (1u)
@@ -178,6 +200,21 @@ const unsigned long GAMEPAD_L2_BURST_DURATION_US = 900000u; // L2自動押下継
 
 const float GAMEPAD_MAGNIFIER_MAX = 0.8f;
 const uint16_t GAMEPAD_MAGNIFIER_THRESHOLD = 16;
+
+const unsigned long REPORT_INTERVAL_US = 1000u;
+const int EEPROM_SIZE_BYTES = 64;
+const uint8_t GAMEPAD_HAT_CENTER = 8;
+
+const unsigned long STARTUP_LED_TOTAL_MS = 5000u;
+const unsigned long STARTUP_LED_BLINK_HALF_MS = 500u;
+const unsigned long ACTIVITY_LED_ON_MS = 70u;
+const unsigned long ACTIVITY_LED_OFF_MS = 140u;
+const unsigned long SPEED_LED_ON_MS = 90u;
+const unsigned long SPEED_LED_OFF_MS = 180u;
+#if defined(BOARD_RP2040_ZERO)
+const uint8_t STARTUP_LED_BRIGHTNESS = 24;
+const uint8_t ACTIVITY_LED_BRIGHTNESS = 40;
+#endif
 
 const uint8_t SETTINGS_MAGIC = 0xA5;
 const uint8_t SETTINGS_VERSION = 2;
